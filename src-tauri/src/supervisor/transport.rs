@@ -4,14 +4,14 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
@@ -27,26 +27,47 @@ const MAX_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
 type PendingRequests =
     Arc<Mutex<HashMap<String, oneshot::Sender<Result<RuntimeResponse, String>>>>>;
 
-/// 一个独立 Node Runtime 进程的通信连接。
-///
-/// 请求可以并发发送；后台任务负责串行写入、
-/// 读取响应、分发事件与处理连接终止。
-pub struct RuntimeSupervisor {
-    child: Child,
-    input: mpsc::Sender<String>,
+// 统一管理写入请求和关闭命令
+enum WriterCommand {
+    Line(String),
+    Shutdown,
+}
+
+/// 可克隆通信句柄，不拥有 Node.js 子进程。
+#[derive(Clone)]
+pub struct RuntimeClient {
+    input: mpsc::Sender<WriterCommand>,
     pending: PendingRequests,
     events: broadcast::Sender<Arc<RuntimeEvent>>,
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+}
+
+/// 请求等待被取消时，自动清理 Pending Map。
+struct PendingGuard {
+    id: String,
+    pending: PendingRequests,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
+
+/// Runtime 进程所有者。
+pub struct RuntimeSupervisor {
+    child: Child,
+    client: RuntimeClient,
     writer_task: JoinHandle<()>,
     reader_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
 }
 
 impl RuntimeSupervisor {
-    /// 开发环境启动入口。
-    ///
-    /// 正式发布版本将使用打包后的 Sidecar，
-    /// 不依赖 node_modules 或用户安装的 Node.js。
+    /// 启动本地开发 Runtime。
     pub fn start_dev() -> Result<Self, String> {
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -54,7 +75,6 @@ impl RuntimeSupervisor {
             .to_path_buf();
 
         let tsx = project_root.join("node_modules/tsx/dist/cli.mjs");
-
         let entry = project_root.join("runtime/src/index.ts");
 
         if !tsx.is_file() || !entry.is_file() {
@@ -85,71 +105,143 @@ impl RuntimeSupervisor {
 
         let stderr = child.stderr.take().ok_or("Cannot open Runtime stderr")?;
 
-        let (input, mut input_rx) = mpsc::channel::<String>(128);
+        let (input, mut input_rx) = mpsc::channel::<WriterCommand>(128);
+
         let (events, _) = broadcast::channel(128);
 
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
 
-        // 一个写入者，保证 JSONL 消息不交错。
+        let closed = Arc::new(AtomicBool::new(false));
+
+        // 唯一 stdin 写入者
+        let writer_pending = Arc::clone(&pending);
+        let writer_closed = Arc::clone(&closed);
+
         let writer_task = tokio::spawn(async move {
-            while let Some(line) = input_rx.recv().await {
-                if let Err(error) = stdin.write_all(line.as_bytes()).await {
-                    eprintln!("[transport] write error: {error}");
-                    break;
+            while let Some(command) = input_rx.recv().await {
+                match command {
+                    WriterCommand::Line(line) => {
+                        if let Err(error) = stdin.write_all(line.as_bytes()).await {
+                            writer_closed.store(true, Ordering::Release);
+
+                            fail_pending(&writer_pending, format!("Runtime write failed: {error}"));
+                            break;
+                        }
+                    }
+
+                    WriterCommand::Shutdown => {
+                        let _ = stdin.shutdown().await;
+                        break;
+                    }
                 }
             }
         });
 
-        // 一个持续读取者，按请求 ID 分发响应。
+        // 唯一 stdout 读取者
         let reader_pending = Arc::clone(&pending);
         let reader_events = events.clone();
+        let reader_closed = Arc::clone(&closed);
 
         let reader_task = tokio::spawn(async move {
-            let result = read_stdout(stdout, &reader_pending, &reader_events).await;
+            let reason = read_stdout(stdout, &reader_pending, &reader_events)
+                .await
+                .err()
+                .unwrap_or_else(|| "Runtime stdout closed".into());
 
-            let reason = match result {
-                Ok(()) => "Runtime stdout closed".to_string(),
-                Err(error) => error,
-            };
-
-            // Runtime 退出或协议损坏，所有未完成请求失败。
-            let mut requests = reader_pending.lock().unwrap();
-
-            for (_, sender) in requests.drain() {
-                let _ = sender.send(Err(reason.clone()));
-            }
+            reader_closed.store(true, Ordering::Release);
+            fail_pending(&reader_pending, reason);
         });
 
-        // stderr 只用于日志，不参与 IPC。
+        // stderr 只记录日志，不参与 IPC
         let stderr_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut stderr = stderr;
+            let mut buffer = [0u8; 4096];
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("[node-runtime] {line}");
+            loop {
+                match stderr.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        eprint!(
+                            "[node-runtime] {}",
+                            String::from_utf8_lossy(&buffer[..size])
+                        );
+                    }
+                    Err(_) => break,
+                }
             }
         });
 
-        Ok(Self {
-            child,
+        let client = RuntimeClient {
             input,
             pending,
             events,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
+            closed,
+        };
+
+        Ok(Self {
+            child,
+            client,
             writer_task,
             reader_task,
             stderr_task,
         })
     }
 
-    /// 发送请求并等待对应响应。
-    ///
-    /// 超时表示结果未知，不代表 Node 业务操作已停止。
+    pub fn client(&self) -> RuntimeClient {
+        self.client.clone()
+    }
+
+    /// 正常关闭，超过宽限期则强制终止。
+    pub async fn shutdown(mut self) -> Result<(), String> {
+        self.client.closed.store(true, Ordering::Release);
+
+        // 限制发送关闭命令的等待时间
+        let _ = timeout(
+            Duration::from_secs(1),
+            self.client.input.send(WriterCommand::Shutdown),
+        )
+        .await;
+
+        let exit = timeout(Duration::from_secs(6), self.child.wait()).await;
+
+        match exit {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                let _ = self.child.kill().await;
+                return Err(error.to_string());
+            }
+            Err(_) => {
+                self.child.kill().await.map_err(|e| e.to_string())?;
+            }
+        }
+
+        let _ = timeout(Duration::from_secs(2), &mut self.writer_task).await;
+
+        let _ = timeout(Duration::from_secs(2), &mut self.reader_task).await;
+
+        let _ = timeout(Duration::from_secs(2), &mut self.stderr_task).await;
+
+        self.writer_task.abort();
+        self.reader_task.abort();
+        self.stderr_task.abort();
+
+        Ok(())
+    }
+}
+
+impl RuntimeClient {
+    /// 并发发送请求，通过 ID 匹配响应。
     pub async fn request(
         &self,
         method: &str,
         params: Value,
         deadline: Duration,
     ) -> Result<RuntimeResponse, String> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err("Runtime is closed".into());
+        }
+
         let id = format!(
             "rust-{}-{}",
             std::process::id(),
@@ -160,83 +252,62 @@ impl RuntimeSupervisor {
 
         let (sender, receiver) = oneshot::channel();
 
-        self.pending.lock().unwrap().insert(id.clone(), sender);
+        {
+            let mut pending = self.pending.lock().map_err(|_| "Pending lock poisoned")?;
 
-        // 写入排队和响应等待共用一个截止时间。
-        let result = timeout(deadline, async {
+            if self.closed.load(Ordering::Acquire) {
+                return Err("Runtime is closed".into());
+            }
+
+            pending.insert(id.clone(), sender);
+        }
+
+        // 即使 Future 被取消，也能释放等待者。
+        let _guard = PendingGuard {
+            id,
+            pending: Arc::clone(&self.pending),
+        };
+
+        let operation = async {
             self.input
-                .send(line)
+                .send(WriterCommand::Line(line))
                 .await
                 .map_err(|_| "Runtime writer closed".to_string())?;
 
             receiver
                 .await
                 .map_err(|_| "Response channel closed".to_string())?
-        })
-        .await;
+        };
 
-        self.pending.lock().unwrap().remove(&id);
-
-        match result {
-            Ok(response) => response,
+        match timeout(deadline, operation).await {
+            Ok(result) => result,
             Err(_) => Err("IPC_TIMEOUT: request outcome is unknown".into()),
         }
     }
 
-    /// 订阅 Runtime 主动发送的事件。
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<RuntimeEvent>> {
         self.events.subscribe()
     }
+}
 
-    /// 正常关闭进程，超时后强制终止。
-    pub async fn shutdown(self) -> Result<(), String> {
-        let Self {
-            mut child,
-            input,
-            writer_task,
-            reader_task,
-            stderr_task,
-            ..
-        } = self;
-
-        // 关闭写入通道，最终关闭子进程 stdin。
-        drop(input);
-
-        let exit = timeout(Duration::from_secs(6), child.wait()).await;
-
-        match exit {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                let _ = child.kill().await;
-                return Err(error.to_string());
-            }
-            Err(_) => {
-                child.kill().await.map_err(|e| e.to_string())?;
-            }
+fn fail_pending(pending: &PendingRequests, reason: String) {
+    if let Ok(mut requests) = pending.lock() {
+        for (_, sender) in requests.drain() {
+            let _ = sender.send(Err(reason.clone()));
         }
-
-        // 让后台读写任务完成收尾。
-        let _ = timeout(Duration::from_secs(2), writer_task).await;
-
-        let _ = timeout(Duration::from_secs(2), reader_task).await;
-
-        let _ = timeout(Duration::from_secs(2), stderr_task).await;
-
-        Ok(())
     }
 }
 
-/// 从 stdout 读取有大小限制的 JSONL 消息。
 async fn read_stdout(
     mut stdout: tokio::process::ChildStdout,
     pending: &PendingRequests,
     events: &broadcast::Sender<Arc<RuntimeEvent>>,
 ) -> Result<(), String> {
-    let mut chunk = [0u8; 8192];
+    let mut buffer = [0u8; 8192];
     let mut line = Vec::new();
 
     loop {
-        let count = stdout.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        let count = stdout.read(&mut buffer).await.map_err(|e| e.to_string())?;
 
         if count == 0 {
             return if line.is_empty() {
@@ -246,7 +317,7 @@ async fn read_stdout(
             };
         }
 
-        for &byte in &chunk[..count] {
+        for &byte in &buffer[..count] {
             if byte == b'\n' {
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -270,7 +341,6 @@ async fn read_stdout(
     }
 }
 
-/// Response 按 ID 分发，Event 通过广播通道发布。
 fn route_message(
     line: &str,
     pending: &PendingRequests,
@@ -278,8 +348,10 @@ fn route_message(
 ) -> Result<(), String> {
     match parse_outbound_line(line).map_err(|e| e.to_string())? {
         RuntimeOutboundMessage::Response(response) => {
-            if let Some(sender) = pending.lock().unwrap().remove(&response.id) {
-                let _ = sender.send(Ok(response));
+            if let Ok(mut requests) = pending.lock() {
+                if let Some(sender) = requests.remove(&response.id) {
+                    let _ = sender.send(Ok(response));
+                }
             }
         }
 
@@ -291,36 +363,43 @@ fn route_message(
     Ok(())
 }
 
-/// 跨进程集成测试：验证 Rust 与真实 Node Runtime 通信。
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[tokio::test]
-    async fn should_handle_concurrent_runtime_requests() {
-        let runtime = RuntimeSupervisor::start_dev().unwrap();
+    async fn should_handle_concurrent_requests() {
+        let supervisor = RuntimeSupervisor::start_dev().unwrap();
+        let client = supervisor.client();
 
-        let (first, second) = tokio::join!(
-            runtime.request(
+        let (ping, info) = tokio::join!(
+            client.request(
                 "runtime.ping",
                 json!({"message": "hello"}),
                 Duration::from_secs(10),
             ),
-            runtime.request("runtime.info", json!({}), Duration::from_secs(10),),
+            client.request("runtime.info", json!({}), Duration::from_secs(10),),
         );
 
-        let first = first.unwrap();
-        let second = second.unwrap();
+        let ping = ping.unwrap();
+        let info = info.unwrap();
 
-        assert!(first.success);
-        assert!(second.success);
-        assert_ne!(first.id, second.id);
+        assert!(ping.success);
+        assert!(info.success);
+        assert_ne!(ping.id, info.id);
 
-        assert_eq!(first.result.unwrap()["message"], "hello");
+        assert_eq!(ping.result.unwrap()["message"], "hello");
+        assert_eq!(info.result.unwrap()["name"], "Pi Studio Runtime");
 
-        assert_eq!(second.result.unwrap()["name"], "Pi Studio Runtime");
+        supervisor.shutdown().await.unwrap();
 
-        runtime.shutdown().await.unwrap();
+        // 关闭后不能继续发送新请求
+        assert!(
+            client
+                .request("runtime.ping", json!({}), Duration::from_secs(1),)
+                .await
+                .is_err()
+        );
     }
 }

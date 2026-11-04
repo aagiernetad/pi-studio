@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::fmt;
@@ -69,7 +69,7 @@ pub struct RuntimeResponse {
 // 3. Event 数据结构
 // ==========================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeEvent {
     pub version: u32,
