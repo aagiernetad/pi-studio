@@ -368,6 +368,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // 1. 验证两个请求能并发执行并正确关联响应
     #[tokio::test]
     async fn should_handle_concurrent_requests() {
         let supervisor = RuntimeSupervisor::start_dev().unwrap();
@@ -394,12 +395,107 @@ mod tests {
 
         supervisor.shutdown().await.unwrap();
 
-        // 关闭后不能继续发送新请求
+        // 进程关闭后，新请求必须被拒绝
         assert!(
             client
                 .request("runtime.ping", json!({}), Duration::from_secs(1),)
                 .await
                 .is_err()
         );
+    }
+
+    // 2. 请求超时后，不应该遗留 Pending Request
+    #[tokio::test]
+    async fn should_cleanup_pending_on_timeout() {
+        let supervisor = RuntimeSupervisor::start_dev().unwrap();
+        let client = supervisor.client();
+
+        // 零时长用于确定性测试截止时间，
+        // 不依赖操作系统调度速度
+        let result = client
+            .request("runtime.ping", json!({}), Duration::ZERO)
+            .await;
+
+        assert!(result.is_err());
+
+        assert!(result.unwrap_err().contains("IPC_TIMEOUT"));
+
+        // 超时后必须清理请求关联表
+        assert!(client.pending.lock().unwrap().is_empty());
+
+        supervisor.shutdown().await.unwrap();
+    }
+
+    // 3. Node.js 异常退出后，所有等待者都应失败
+    #[tokio::test]
+    async fn should_fail_pending_when_runtime_crashes() {
+        let mut supervisor = RuntimeSupervisor::start_dev().unwrap();
+
+        let client = supervisor.client();
+
+        // 注入一个测试用等待者，用于验证连接中断清理。
+        // 不需要新增生产环境的模拟 Handler。
+        let (sender, receiver) = oneshot::channel();
+
+        client
+            .pending
+            .lock()
+            .unwrap()
+            .insert("test-pending".into(), sender);
+
+        // 模拟 Node.js Runtime 意外终止
+        supervisor.child.kill().await.unwrap();
+
+        // Reader 必须发现 stdout 关闭并通知等待者
+        let response = timeout(Duration::from_secs(5), receiver)
+            .await
+            .expect("Reader did not notify pending request")
+            .expect("Pending response channel dropped");
+
+        assert!(response.is_err());
+
+        // 不应再接受新请求
+        assert!(client.closed.load(Ordering::Acquire));
+
+        assert!(
+            client
+                .request("runtime.ping", json!({}), Duration::from_secs(1),)
+                .await
+                .is_err()
+        );
+
+        supervisor.shutdown().await.unwrap();
+    }
+
+    // 4. Event 应该通过广播通道到达订阅者
+    #[tokio::test]
+    async fn should_broadcast_runtime_events() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+
+        let (events, _) = broadcast::channel(8);
+        let mut subscriber = events.subscribe();
+
+        let line = json!({
+            "version": 1,
+            "kind": "event",
+            "event": "task.progress",
+            "sequence": 1,
+            "data": {
+                "taskId": "test-task",
+                "progress": 50
+            }
+        })
+        .to_string();
+
+        route_message(&line, &pending, &events).unwrap();
+
+        let received = timeout(Duration::from_secs(1), subscriber.recv())
+            .await
+            .expect("Event delivery timed out")
+            .expect("Event channel closed");
+
+        assert_eq!(received.event, "task.progress");
+        assert_eq!(received.sequence, 1);
+        assert_eq!(received.data["progress"], 50);
     }
 }
