@@ -57,3 +57,4 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.repo_memory/
