@@ -528,4 +528,62 @@ mod tests {
         assert_eq!(received.sequence, 1);
         assert_eq!(received.data["progress"], 50);
     }
+    // 验证 Durable Entry 能跨 Node.js 进程重启持久化。
+    #[tokio::test]
+    async fn should_persist_durable_entry_across_runtime_restart() {
+        let data_dir = test_data_dir();
+        let marker = "rust-ipc-persistence-test";
+
+        // 第一次启动 Node.js Runtime
+        let first = RuntimeSupervisor::start_dev(&data_dir).unwrap();
+        let first_client = first.client();
+
+        // 通过真正的 JSONL IPC 写入 Durable Entry
+        let write_response = first_client
+            .request(
+                "durable.probe.write",
+                json!({ "marker": marker }),
+                Duration::from_secs(15),
+            )
+            .await
+            .unwrap();
+
+        assert!(write_response.success);
+
+        let write_result = write_response.result.unwrap();
+
+        assert_eq!(write_result["marker"].as_str(), Some(marker));
+
+        // 完全关闭第一个 Node.js 进程
+        first.shutdown().await.unwrap();
+
+        // 再次启动一个全新的 Node.js 进程
+        let second = RuntimeSupervisor::start_dev(&data_dir).unwrap();
+        let second_client = second.client();
+
+        // 从相同的 SQLite 数据库读取
+        let read_response = second_client
+            .request("durable.probe.read", json!({}), Duration::from_secs(15))
+            .await
+            .unwrap();
+
+        assert!(read_response.success);
+
+        let read_result = read_response.result.unwrap();
+
+        // 验证真正持久化的内容
+        assert_eq!(read_result["found"], true);
+
+        assert_eq!(read_result["data"]["marker"].as_str(), Some(marker));
+
+        assert_eq!(
+            read_result["conversationId"],
+            write_result["conversationId"]
+        );
+
+        // 关闭第二个进程并清理测试数据
+        second.shutdown().await.unwrap();
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
 }

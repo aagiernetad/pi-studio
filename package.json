@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "runtime:typecheck": "tsc -p runtime/tsconfig.json --noEmit",
-    "runtime:test": "node --import tsx --test runtime/src/protocol/*.test.ts runtime/src/handlers/*.test.ts runtime/src/server/*.test.ts"
+    "runtime:test": "node --import tsx --test runtime/src/protocol/*.test.ts runtime/src/handlers/*.test.ts runtime/src/server/*.test.ts runtime/src/durable/*.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
