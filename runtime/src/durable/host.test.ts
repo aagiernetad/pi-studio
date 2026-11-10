@@ -86,3 +86,111 @@ test(
     }
   },
 );
+
+
+test(
+  "DurableHost persists independent conversations",
+  async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pi-studio-conversations-"),
+    );
+
+    const markerA = randomUUID();
+    const markerB = randomUUID();
+
+    let host: DurableHost | undefined;
+
+    try {
+      // 1. 创建两个独立 Conversation
+      host = await DurableHost.open(directory);
+
+      const first = await host.createConversation();
+      const second = await host.createConversation();
+
+      assert.notEqual(first.id, second.id);
+
+      const firstId = first.id;
+      const secondId = second.id;
+
+      // 2. 分别写入不同内容
+      await first.submit(
+        {
+          type: "write",
+          entry: {
+            kind: "app.persistence-probe",
+            data: { marker: markerA },
+          },
+        },
+        BACKGROUND_CONTEXT,
+      );
+
+      await second.submit(
+        {
+          type: "write",
+          entry: {
+            kind: "app.persistence-probe",
+            data: { marker: markerB },
+          },
+        },
+        BACKGROUND_CONTEXT,
+      );
+
+      // 3. 关闭并重新打开 SQLite
+      await host.close();
+      host = undefined;
+
+      host = await DurableHost.open(directory);
+
+      const restoredA = await host.conversation(firstId);
+      const restoredB = await host.conversation(secondId);
+
+      assert.ok(restoredA, "Conversation A not found");
+      assert.ok(restoredB, "Conversation B not found");
+
+      // 4. 重新读取各自的 Transcript
+      const entriesA = await restoredA.entries(
+        {},
+        100,
+        undefined,
+        BACKGROUND_CONTEXT,
+      );
+
+      const entriesB = await restoredB.entries(
+        {},
+        100,
+        undefined,
+        BACKGROUND_CONTEXT,
+      );
+
+      const markersA = entriesA.items
+        .filter((entry) =>
+          entry.kind === "app.persistence-probe"
+        )
+        .map((entry) => entry.data);
+
+      const markersB = entriesB.items
+        .filter((entry) =>
+          entry.kind === "app.persistence-probe"
+        )
+        .map((entry) => entry.data);
+
+      // 5. 验证内容独立且没有混淆
+      assert.deepEqual(markersA, [
+        { marker: markerA },
+      ]);
+
+      assert.deepEqual(markersB, [
+        { marker: markerB },
+      ]);
+    } finally {
+      if (host) {
+        await host.close();
+      }
+
+      await rm(directory, {
+        recursive: true,
+        force: true,
+      });
+    }
+  },
+);

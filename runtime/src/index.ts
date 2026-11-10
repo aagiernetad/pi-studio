@@ -1,6 +1,7 @@
 
 import { DurableHost } from "./durable/host.js";
 import { registerDurableProbeHandlers } from "./durable/handlers.js";
+import { registerConversationHandlers } from "./durable/conversation-handlers.js";
 
 import { RuntimeHandlerRegistry } from "./handlers/registry.js";
 import { RuntimeRequestDispatcher } from "./handlers/dispatcher.js";
@@ -9,10 +10,8 @@ import { registerRuntimeHandlers } from "./handlers/runtime.js";
 import { JsonlServer } from "./server/jsonl-server.js";
 
 /**
- * Pi Studio Node.js Runtime 入口。
- *
- * 负责依赖初始化和生命周期，
- * 不直接实现 Agent 业务逻辑。
+ * Pi Studio Node.js Runtime Composition Root。
+ * 负责组合依赖、启动和关闭，不实现业务逻辑。
  */
 async function main(): Promise<void> {
   const dataDir = process.env.PI_STUDIO_DATA_DIR;
@@ -30,8 +29,11 @@ async function main(): Promise<void> {
 
     registerRuntimeHandlers(registry);
 
-    // 共享已初始化的 DurableHost
+    // 旧版持久化诊断接口，暂时保留
     registerDurableProbeHandlers(registry, durableHost);
+
+    // 正式 Conversation IPC
+    registerConversationHandlers(registry, durableHost);
 
     const dispatcher = new RuntimeRequestDispatcher(registry);
 

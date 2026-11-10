@@ -6,20 +6,22 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import {
   Harness,
   createRegistry,
+  type Conversation,
+  type ConversationId,
 } from "@earendil-works/pi-durable";
 import {
   openNodeSqliteStorage,
 } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 /**
- * Pi Durable 的应用级宿主。
+ * Pi Durable 应用级宿主。
  *
- * 只负责 Harness 与 SQLite 生命周期，
- * 不实现 Agent Loop、Scheduler 或 Checkpoint。
+ * 负责 Harness 与 SQLite 生命周期，
+ * 不负责业务会话分类、Agent Loop 和任务调度。
  */
 export class DurableHost {
   private constructor(
-    private readonly harness: Harness,
+     readonly harness: Harness,
   ) {}
 
   static async open(dataDir: string): Promise<DurableHost> {
@@ -47,19 +49,36 @@ export class DurableHost {
       BACKGROUND_CONTEXT,
     );
 
-    // 当前没有自定义任务或扩展。
-    // 将来必须先完成扩展注册，再恢复任务。
+    // 当前没有自定义扩展。
+    // 未来必须先注册持久化任务定义，再 resume。
     harness.resume();
 
     return new DurableHost(harness);
   }
 
-  /**
-   * 获取 Durable 原生 Root Conversation。
-   * 不创建第二套 Conversation Manager。
-   */
-  async root() {
+  // 获取 Durable 内部 Root Conversation
+  async root(): Promise<Conversation> {
     return this.harness.root(BACKGROUND_CONTEXT);
+  }
+
+  // 创建独立 Conversation
+  async createConversation(): Promise<Conversation> {
+    return this.harness.createConversation(
+      {
+        ownership: { kind: "ownerless" },
+      },
+      BACKGROUND_CONTEXT,
+    );
+  }
+
+  // 根据原生 ID 查询 Conversation
+  async conversation(
+    id: ConversationId,
+  ): Promise<Conversation | undefined> {
+    return this.harness.conversation(
+      id,
+      BACKGROUND_CONTEXT,
+    );
   }
 
   async close(): Promise<void> {
