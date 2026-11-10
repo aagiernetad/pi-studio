@@ -83,9 +83,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 在 Tokio 上下文内启动 Node.js Runtime
-            let supervisor =
-                tauri::async_runtime::block_on(async { RuntimeSupervisor::start_dev() })
-                    .map_err(std::io::Error::other)?;
+            // 获取 Tauri 应用专属数据目录
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+            // 确保目录存在
+            std::fs::create_dir_all(&app_data_dir)?;
+
+            // 在 Tokio 上下文内启动 Node.js Runtime
+            let supervisor = tauri::async_runtime::block_on(async {
+                RuntimeSupervisor::start_dev(&app_data_dir)
+            })
+            .map_err(std::io::Error::other)?;
 
             let client = supervisor.client();
 

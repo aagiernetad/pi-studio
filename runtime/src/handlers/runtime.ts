@@ -55,6 +55,7 @@ export function registerRuntimeHandlers(
       nodeVersion: process.version,
       pid: process.pid,
       uptime: process.uptime(),
+      dataDirectoryConfigured: Boolean(process.env.PI_STUDIO_DATA_DIR),
     };
   });
 }

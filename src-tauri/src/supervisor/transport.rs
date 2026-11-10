@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -68,7 +68,14 @@ pub struct RuntimeSupervisor {
 
 impl RuntimeSupervisor {
     /// 启动本地开发 Runtime。
-    pub fn start_dev() -> Result<Self, String> {
+    pub fn start_dev(data_dir: &Path) -> Result<Self, String> {
+        if !data_dir.is_dir() {
+            return Err(format!(
+                "Runtime data directory does not exist: {}",
+                data_dir.display()
+            ));
+        }
+
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .ok_or("Cannot determine project root")?
@@ -87,6 +94,7 @@ impl RuntimeSupervisor {
             .arg(tsx)
             .arg(entry)
             .current_dir(&project_root)
+            .env("PI_STUDIO_DATA_DIR", data_dir.as_os_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -366,12 +374,28 @@ fn route_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_DATA_DIR_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+
+    fn test_data_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pi-studio-runtime-test-{}-{}",
+            std::process::id(),
+            TEST_DATA_DIR_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+
+        std::fs::create_dir_all(&path).unwrap();
+
+        path
+    }
+
     use serde_json::json;
 
     // 1. 验证两个请求能并发执行并正确关联响应
     #[tokio::test]
     async fn should_handle_concurrent_requests() {
-        let supervisor = RuntimeSupervisor::start_dev().unwrap();
+        let data_dir = test_data_dir();
+        let supervisor = RuntimeSupervisor::start_dev(&data_dir).unwrap();
         let client = supervisor.client();
 
         let (ping, info) = tokio::join!(
@@ -391,7 +415,9 @@ mod tests {
         assert_ne!(ping.id, info.id);
 
         assert_eq!(ping.result.unwrap()["message"], "hello");
-        assert_eq!(info.result.unwrap()["name"], "Pi Studio Runtime");
+        let info_result = info.result.unwrap();
+        assert_eq!(info_result["name"], "Pi Studio Runtime");
+        assert_eq!(info_result["dataDirectoryConfigured"], true);
 
         supervisor.shutdown().await.unwrap();
 
@@ -402,12 +428,14 @@ mod tests {
                 .await
                 .is_err()
         );
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     // 2. 请求超时后，不应该遗留 Pending Request
     #[tokio::test]
     async fn should_cleanup_pending_on_timeout() {
-        let supervisor = RuntimeSupervisor::start_dev().unwrap();
+        let data_dir = test_data_dir();
+        let supervisor = RuntimeSupervisor::start_dev(&data_dir).unwrap();
         let client = supervisor.client();
 
         // 零时长用于确定性测试截止时间，
@@ -424,13 +452,14 @@ mod tests {
         assert!(client.pending.lock().unwrap().is_empty());
 
         supervisor.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     // 3. Node.js 异常退出后，所有等待者都应失败
     #[tokio::test]
     async fn should_fail_pending_when_runtime_crashes() {
-        let mut supervisor = RuntimeSupervisor::start_dev().unwrap();
-
+        let data_dir = test_data_dir();
+        let mut supervisor = RuntimeSupervisor::start_dev(&data_dir).unwrap();
         let client = supervisor.client();
 
         // 注入一个测试用等待者，用于验证连接中断清理。
@@ -465,6 +494,7 @@ mod tests {
         );
 
         supervisor.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     // 4. Event 应该通过广播通道到达订阅者
