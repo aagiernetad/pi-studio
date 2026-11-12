@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import ConversationPanel from "./ConversationPanel";
 import "./App.css";
 
 interface RuntimeInfo {
@@ -141,6 +142,8 @@ function App() {
               : "Runtime Offline"}
         </div>
       </header>
+
+      <ConversationPanel />
 
       <section className="panel">
         <div className="section-heading">
