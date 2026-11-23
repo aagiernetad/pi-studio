@@ -2,6 +2,7 @@
 import { isAbsolute, join } from "node:path";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { CredentialStore } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   Harness,
@@ -25,7 +26,7 @@ export class DurableHost {
     readonly models: ReturnType<typeof builtinModels>,
   ) {}
 
-  static async open(dataDir: string): Promise<DurableHost> {
+  static async open(dataDir: string, credentials?: CredentialStore): Promise<DurableHost> {
     if (!isAbsolute(dataDir)) {
       throw new Error(
         "Durable data directory must be absolute",
@@ -43,7 +44,7 @@ export class DurableHost {
 
     // 整个 Runtime 生命周期只创建一次 Models。
     // Provider 管理和 Harness 共享同一个实例。
-    const models = builtinModels();
+    const models = builtinModels({ credentials });
 
     const harness = await Harness.open(
       storage,

@@ -1,6 +1,6 @@
 # V0.3.2-A2：只读 Provider / Model 目录 IPC
 
-验收日期：2026-11-23。起点提交：`9fe36a5`（A1 统一 Models 实例）。
+验收日期：2026-11-23。起点提交：`dedb166`（A1 统一 Models 实例，提交说明改为中文后的哈希）。
 
 ## 实施前核查与范围
 
@@ -49,4 +49,4 @@
 
 ## Git 审核约定
 
-本阶段提交名称：`feat(provider): add read-only provider and model catalog IPC`。推送前先向用户展示 A1 / A2 的具体提交名称与哈希，经确认后再推送 GitHub。
+本阶段最终提交：`3f814d1 feat(provider): 支持查询服务商和模型列表`。已向用户展示并获得确认，随后与 A1 一并推送 GitHub。后续提交使用中文描述实际功能，推送前仍需向用户展示具体名称与哈希并获得确认。

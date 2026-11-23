@@ -7,6 +7,8 @@ import { RuntimeHandlerRegistry } from "./handlers/registry.js";
 import { RuntimeRequestDispatcher } from "./handlers/dispatcher.js";
 import { registerRuntimeHandlers } from "./handlers/runtime.js";
 import { registerProviderHandlers } from "./handlers/providers.js";
+import { registerProviderCredentialHandlers } from "./handlers/provider-credentials.js";
+import { createSystemCredentialStore } from "./credentials/system-store.js";
 
 import { JsonlServer } from "./server/jsonl-server.js";
 
@@ -21,7 +23,8 @@ async function main(): Promise<void> {
     throw new Error("PI_STUDIO_DATA_DIR is required");
   }
 
-  const durableHost = await DurableHost.open(dataDir);
+  const credentials = createSystemCredentialStore();
+  const durableHost = await DurableHost.open(dataDir, credentials);
 
   process.stderr.write("[runtime] DurableHost ready\n");
 
@@ -30,6 +33,7 @@ async function main(): Promise<void> {
 
     registerRuntimeHandlers(registry);
     registerProviderHandlers(registry, durableHost.models);
+    registerProviderCredentialHandlers(registry, durableHost.models, credentials);
 
     // 旧版持久化诊断接口，暂时保留
     registerDurableProbeHandlers(registry, durableHost);
