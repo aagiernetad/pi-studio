@@ -51,4 +51,4 @@ Windows 凭据 API 没有由本适配器使用的跨进程读改写锁。本阶�
 
 当前仍未提供桌面输入框、Tauri 凭据命令、自定义 endpoint、连通性验证或模型聊天；未执行 `pnpm tauri dev`。下一步验证自定义服务商配置与连通性接口，再接入设置页面。
 
-本地提交名称：`feat(provider): 支持安全保存和删除服务商 API Key`。本阶段推送需另行获得用户确认。
+提交：`3c3cabf feat(provider): 支持安全保存和删除服务商 API Key`。用户确认后已推送 GitHub。

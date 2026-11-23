@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { RuntimeApplicationError } from "../protocol/errors.js";
 import { RuntimeHandlerRegistry } from "./registry.js";
+import { supportsConnectionTest } from "./provider-test.js";
 
 const ProviderListParams = z.object({}).strict();
 const ModelListParams = z.object({
@@ -40,6 +41,7 @@ export function registerProviderHandlers(
       .map((provider) => ({
         id: provider.id,
         name: provider.name,
+        supportsApiKey: Boolean(provider.auth.apiKey?.login),
       }))
       .sort((a, b) => a.id.localeCompare(b.id)));
   });
@@ -74,6 +76,7 @@ export function registerProviderHandlers(
         input: [...model.input],
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,
+        supportsConnectionTest: supportsConnectionTest(model.api),
       }))
       .sort((a, b) => a.id.localeCompare(b.id)));
   });

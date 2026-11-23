@@ -53,7 +53,7 @@ test("catalog handlers list built-ins without auth or remote operations", async 
   const providers = await request("provider.list");
   assert.ok(providers.success);
   assert.deepEqual(providers.result.items, models.getProviders()
-    .map(({ id, name }) => ({ id, name }))
+    .map(({ id, name, auth }) => ({ id, name, supportsApiKey: Boolean(auth.apiKey?.login) }))
     .sort((a, b) => a.id.localeCompare(b.id)));
 
   for (const providerId of ["deepseek", "openai", "anthropic"]) {
@@ -96,7 +96,7 @@ test("catalog handlers read the live collection and expose only allowed fields",
   const providers = await request("provider.list");
   assert.ok(providers.success);
   assert.deepEqual(providers.result, {
-    items: [{ id: provider.id, name: provider.name }],
+    items: [{ id: provider.id, name: provider.name, supportsApiKey: true }],
   });
   const response = await request("model.list", { providerId: provider.id });
   assert.ok(response.success);
@@ -109,6 +109,7 @@ test("catalog handlers read the live collection and expose only allowed fields",
     input: [...model.input],
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
+    supportsConnectionTest: true,
   }] });
   assert.equal(JSON.stringify([providers, response]).includes(sentinel), false);
 
@@ -187,6 +188,9 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
       { id: "providers", method: "provider.list", params: {} },
       { id: "models", method: "model.list", params: { providerId: "deepseek" } },
       { id: "ping", method: "runtime.ping", params: { message: "catalog-check" } },
+      { id: "test-params", method: "provider.test", params: {} },
+      { id: "configs", method: "provider.config.list", params: {} },
+      { id: "config-params", method: "provider.config.set", params: {} },
     ];
     child.stdin.end(requests.map((request) => JSON.stringify({
       version: 1, kind: "request", ...request,
@@ -199,7 +203,7 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
     }
     const [code] = await closed;
     assert.equal(code, 0);
-    assert.equal(responses.size, 3);
+    assert.equal(responses.size, 6);
     const providers = responses.get("providers");
     assert.ok(providers?.success);
     assert.ok(Array.isArray(providers.result.items));
@@ -211,6 +215,15 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
     const ping = responses.get("ping");
     assert.ok(ping?.success);
     assert.equal(ping.result.message, "catalog-check");
+    const invalidTest = responses.get("test-params");
+    assert.ok(invalidTest && !invalidTest.success);
+    assert.equal(invalidTest.error.code, "INVALID_PARAMS");
+    const configs = responses.get("configs");
+    assert.ok(configs?.success);
+    assert.deepEqual(configs.result.items, []);
+    const invalidConfig = responses.get("config-params");
+    assert.ok(invalidConfig && !invalidConfig.success);
+    assert.equal(invalidConfig.error.code, "INVALID_PARAMS");
   } finally {
     if (child.exitCode === null) child.kill();
     await closed;

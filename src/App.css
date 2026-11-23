@@ -409,3 +409,76 @@ footer {
   background: #192635;
   border-radius: 6px;
 }
+
+.provider-settings summary {
+  cursor: pointer;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.provider-editor {
+  margin-top: 18px;
+}
+
+.provider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-field > span {
+  font-size: 13px;
+  color: #b7c3d3;
+}
+
+.provider-picker {
+  flex: 1;
+}
+
+.provider-field select {
+  font: inherit;
+  width: 100%;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #414c5c;
+  border-radius: 7px;
+  color: #e8edf4;
+  background: #101419;
+}
+
+.provider-field select:focus-visible,
+.provider-settings summary:focus-visible {
+  outline: 2px solid #6c9dff;
+  outline-offset: 2px;
+}
+
+.provider-status,
+.provider-actions,
+.provider-test-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.provider-status {
+  justify-content: space-between;
+  margin-bottom: 18px;
+  font-size: 13px;
+}
+
+.provider-test-row {
+  margin-top: 20px;
+}
+
+.provider-notice {
+  color: #75dcb0;
+  font-size: 13px;
+}
+.provider-config-fields {
+  border: 0;
+  padding: 0;
+  margin: 12px 0 0;
+  min-width: 0;
+}

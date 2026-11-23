@@ -8,7 +8,9 @@ import { RuntimeRequestDispatcher } from "./handlers/dispatcher.js";
 import { registerRuntimeHandlers } from "./handlers/runtime.js";
 import { registerProviderHandlers } from "./handlers/providers.js";
 import { registerProviderCredentialHandlers } from "./handlers/provider-credentials.js";
+import { registerProviderTestHandlers } from "./handlers/provider-test.js";
 import { createSystemCredentialStore } from "./credentials/system-store.js";
+import { registerProviderConfigHandlers } from "./handlers/provider-config.js";
 
 import { JsonlServer } from "./server/jsonl-server.js";
 
@@ -23,7 +25,8 @@ async function main(): Promise<void> {
     throw new Error("PI_STUDIO_DATA_DIR is required");
   }
 
-  const credentials = createSystemCredentialStore();
+  // 可信启动配置可指定独立命名空间，用于隔离桌面集成测试。
+  const credentials = createSystemCredentialStore(process.env.PI_STUDIO_CREDENTIAL_SERVICE);
   const durableHost = await DurableHost.open(dataDir, credentials);
 
   process.stderr.write("[runtime] DurableHost ready\n");
@@ -34,6 +37,8 @@ async function main(): Promise<void> {
     registerRuntimeHandlers(registry);
     registerProviderHandlers(registry, durableHost.models);
     registerProviderCredentialHandlers(registry, durableHost.models, credentials);
+    registerProviderTestHandlers(registry, durableHost.models);
+    registerProviderConfigHandlers(registry, durableHost);
 
     // 旧版持久化诊断接口，暂时保留
     registerDurableProbeHandlers(registry, durableHost);

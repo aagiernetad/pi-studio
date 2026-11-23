@@ -13,6 +13,7 @@ import {
 import {
   openNodeSqliteStorage,
 } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { configuredProvider, listProviderConfigs } from "./provider-config.js";
 
 /**
  * Pi Durable 应用级宿主。
@@ -54,6 +55,16 @@ export class DurableHost {
       },
       BACKGROUND_CONTEXT,
     );
+
+    // 恢复应用配置后再恢复任务；仍使用同一个 Models。
+    try {
+      for (const config of await listProviderConfigs(harness)) {
+        models.setProvider(configuredProvider(config));
+      }
+    } catch {
+      await harness.close(BACKGROUND_CONTEXT);
+      throw new Error("Provider configuration could not be restored");
+    }
 
     // 恢复持久化任务
     harness.resume();

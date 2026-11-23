@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConversationPanel from "./ConversationPanel";
+import ProviderSettings from "./ProviderSettings";
 import "./App.css";
 
 interface RuntimeInfo {
@@ -144,6 +145,7 @@ function App() {
       </header>
 
       <ConversationPanel />
+      <ProviderSettings />
 
       <section className="panel">
         <div className="section-heading">

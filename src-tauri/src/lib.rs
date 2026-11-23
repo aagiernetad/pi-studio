@@ -154,8 +154,108 @@ async fn conversation_entries(
 }
 
 // ==========================================
-// 5. Tauri 应用入口
+// 5. 服务商设置 Commands
 // ==========================================
+
+#[tauri::command]
+async fn provider_list(state: State<'_, RuntimeState>) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "provider.list", json!({})).await
+}
+
+#[tauri::command]
+async fn model_list(state: State<'_, RuntimeState>, provider_id: String) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "model.list",
+        json!({ "providerId": provider_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn provider_credential_status(
+    state: State<'_, RuntimeState>,
+    provider_id: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "provider.credential.status",
+        json!({ "providerId": provider_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn provider_credential_set(
+    state: State<'_, RuntimeState>,
+    provider_id: String,
+    api_key: String,
+) -> Result<Value, String> {
+    // 密钥仅通过现有 IPC 转交 Node，不在 Rust 记录或持久化。
+    call_runtime(
+        state.client.clone(),
+        "provider.credential.set",
+        json!({ "providerId": provider_id, "apiKey": api_key }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn provider_credential_delete(
+    state: State<'_, RuntimeState>,
+    provider_id: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "provider.credential.delete",
+        json!({ "providerId": provider_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn provider_test(
+    state: State<'_, RuntimeState>,
+    provider_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "provider.test",
+        json!({ "providerId": provider_id, "modelId": model_id }),
+    )
+    .await
+}
+
+// ==========================================
+// 6. Tauri 应用入口
+// ==========================================
+
+#[tauri::command]
+async fn provider_config_list(state: State<'_, RuntimeState>) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "provider.config.list", json!({})).await
+}
+
+#[tauri::command]
+async fn provider_config_set(
+    state: State<'_, RuntimeState>,
+    config: Value,
+) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "provider.config.set", config).await
+}
+
+#[tauri::command]
+async fn provider_config_delete(
+    state: State<'_, RuntimeState>,
+    provider_id: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "provider.config.delete",
+        json!({ "providerId": provider_id }),
+    )
+    .await
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -237,6 +337,15 @@ pub fn run() {
             conversation_list,
             conversation_get,
             conversation_entries,
+            provider_list,
+            model_list,
+            provider_credential_status,
+            provider_credential_set,
+            provider_credential_delete,
+            provider_test,
+            provider_config_list,
+            provider_config_set,
+            provider_config_delete,
         ])
         .build(tauri::generate_context!())
         .expect("Failed to build Pi Studio");
