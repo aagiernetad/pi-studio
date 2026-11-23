@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { Harness } from "@earendil-works/pi-durable";
 
 import { DurableHost } from "./host.js";
 
@@ -194,3 +195,59 @@ test(
     }
   },
 );
+
+
+test("DurableHost shares built-in models with its Harness", async (context) => {
+  // 记录真实调用，仍打开真实 Harness / SQLite，不调用模型 API。
+  const open = context.mock.method(Harness, "open");
+  const directory = await mkdtemp(
+    join(tmpdir(), "pi-studio-models-"),
+  );
+
+  let host: DurableHost | undefined;
+
+  try {
+    host = await DurableHost.open(directory);
+
+    assert.equal(open.mock.callCount(), 1);
+    assert.strictEqual(
+      open.mock.calls[0]?.arguments[1].models,
+      host.models,
+      "Harness must receive the Models collection exposed by the host",
+    );
+
+    const providerIds = host.models
+      .getProviders()
+      .map((provider) => provider.id);
+
+    // 目录读取不需要凭据；目录存在不代表认证或推理可用。
+    for (const providerId of ["deepseek", "openai", "anthropic"]) {
+      assert.ok(providerIds.includes(providerId));
+
+      const models = host.models.getModels(providerId);
+      assert.ok(models.length > 0, `${providerId} catalog is empty`);
+      assert.ok(models.every((model) => model.provider === providerId));
+
+      for (const model of models) {
+        assert.deepEqual(
+          host.models.getModel(providerId, model.id),
+          model,
+        );
+      }
+    }
+
+    // 确认原有 Durable Harness 仍可正常使用
+    const root = await host.root();
+
+    assert.ok(root.id);
+  } finally {
+    if (host) {
+      await host.close();
+    }
+
+    await rm(directory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});

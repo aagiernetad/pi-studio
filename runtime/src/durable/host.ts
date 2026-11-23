@@ -2,7 +2,7 @@
 import { isAbsolute, join } from "node:path";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   Harness,
   createRegistry,
@@ -16,12 +16,13 @@ import {
 /**
  * Pi Durable 应用级宿主。
  *
- * 负责 Harness 与 SQLite 生命周期，
- * 不负责业务会话分类、Agent Loop 和任务调度。
+ * 管理 Harness、Models 和 SQLite 的生命周期。
+ * 不负责 Agent Loop、业务任务或模型凭据存储。
  */
 export class DurableHost {
   private constructor(
-     readonly harness: Harness,
+    readonly harness: Harness,
+    readonly models: ReturnType<typeof builtinModels>,
   ) {}
 
   static async open(dataDir: string): Promise<DurableHost> {
@@ -40,23 +41,26 @@ export class DurableHost {
       databasePath,
     );
 
+    // 整个 Runtime 生命周期只创建一次 Models。
+    // Provider 管理和 Harness 共享同一个实例。
+    const models = builtinModels();
+
     const harness = await Harness.open(
       storage,
       {
-        models: createModels(),
+        models,
         registry: createRegistry(),
       },
       BACKGROUND_CONTEXT,
     );
 
-    // 当前没有自定义扩展。
-    // 未来必须先注册持久化任务定义，再 resume。
+    // 恢复持久化任务
     harness.resume();
 
-    return new DurableHost(harness);
+    return new DurableHost(harness, models);
   }
 
-  // 获取 Durable 内部 Root Conversation
+  // 获取内部 Root Conversation
   async root(): Promise<Conversation> {
     return this.harness.root(BACKGROUND_CONTEXT);
   }
@@ -71,7 +75,7 @@ export class DurableHost {
     );
   }
 
-  // 根据原生 ID 查询 Conversation
+  // 根据 ID 查找 Conversation
   async conversation(
     id: ConversationId,
   ): Promise<Conversation | undefined> {
