@@ -6,6 +6,7 @@ import { registerConversationHandlers } from "./durable/conversation-handlers.js
 import { RuntimeHandlerRegistry } from "./handlers/registry.js";
 import { RuntimeRequestDispatcher } from "./handlers/dispatcher.js";
 import { registerRuntimeHandlers } from "./handlers/runtime.js";
+import { registerProviderHandlers } from "./handlers/providers.js";
 
 import { JsonlServer } from "./server/jsonl-server.js";
 
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
     const registry = new RuntimeHandlerRegistry();
 
     registerRuntimeHandlers(registry);
+    registerProviderHandlers(registry, durableHost.models);
 
     // 旧版持久化诊断接口，暂时保留
     registerDurableProbeHandlers(registry, durableHost);
