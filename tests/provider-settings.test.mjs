@@ -25,6 +25,7 @@ async function fixture(run, withChat = false) {
         invoke: async (command, args = {}) => {
           state.calls.push(command);
           if (command.startsWith("plugin:event|")) return 1;
+          if (command === "plugin:opener|open_url") { state.openedUrl = args.url; return; }
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
           if (command === "conversation_list") return { items: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [], nextBeforeId: null };
           if (command === "conversation_entries") {
@@ -274,4 +275,50 @@ test("停止后可继续原上下文，超时重试沿用继续请求且保留�
   assert.equal(args.length, 2);
   assert.equal(args[0].requestId, args[1].requestId);
   assert.equal(await chat.getByRole('button', { name: '继续上次生成', exact: true }).count(), 0);
+}, true));
+
+test("助手回复渲染 Markdown 与表格，复制保留代码和原始消息，用户消息保持纯文本", async () => fixture(async (page) => {
+  const reply = '# 验收结果\n\n**完成**，使用 `value`。\n\n| 项目 | 状态 |\n| --- | --- |\n| 渲染 | 通过 |\n\n```ts\nconst value = 42;\n```\n\n[参考](https://example.test/docs)';
+  await page.evaluate((text) => {
+    window.fixture.entries[1] = [
+      { id: 2, kind: 'pi.assistant', model: [{ role: 'assistant', content: [{ type: 'text', text }] }] },
+      { id: 1, kind: 'studio.chat-input', model: [{ role: 'user', content: '# 用户原文 **不变**' }] },
+    ];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value) => { window.fixture.copied = value; } } });
+  }, reply);
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const answer = page.locator('.transcript-entry').filter({ has: page.locator('.message-markdown') });
+  await answer.getByRole('heading', { name: '验收结果' }).waitFor();
+  assert.equal(await answer.locator('table tbody td').last().textContent(), '通过');
+  assert.equal(await answer.locator('strong').filter({ hasText: '完成' }).count(), 1);
+  await answer.getByRole('button', { name: '复制代码', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.copied), 'const value = 42;\n');
+  await answer.getByRole('button', { name: '复制回复', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.copied), reply);
+  await answer.getByRole('link', { name: '参考', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.openedUrl), 'https://example.test/docs');
+  const user = page.locator('.transcript-entry').filter({ hasText: '# 用户原文 **不变**' });
+  assert.equal(await user.locator('.message-markdown').count(), 0);
+  await user.getByRole('button', { name: '复制消息', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.copied), '# 用户原文 **不变**');
+  await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw Error('private-clipboard-error'); }; });
+  await answer.getByRole('button', { name: '复制回复', exact: true }).click();
+  await answer.getByText('复制失败，请手动选择文本复制。', { exact: true }).waitFor();
+  assert.equal((await answer.innerText()).includes('private-clipboard-error'), false);
+}, true));
+
+test("模型内容不能执行 HTML 或危险链接，也不会自动加载远程图片", async () => fixture(async (page) => {
+  const requests = [];
+  page.on('request', (request) => { if (request.url().includes('untrusted.example')) requests.push(request.url()); });
+  await page.evaluate(() => {
+    const text = '<script>window.modelExecuted = true</script>\n\n<img src="https://untrusted.example/raw.png" onerror="window.modelExecuted=true">\n\n[危险](javascript:alert(1)) [文件](file:///C:/test) [相对](/secret)\n\n![模型图片](https://untrusted.example/image.png)\n\n```html\n<script>示例代码</script>\n```';
+    window.fixture.entries[1] = [{ id: 1, kind: 'pi.assistant', model: [{ role: 'assistant', content: [{ type: 'text', text }] }] }];
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const rendered = page.locator('.message-markdown');
+  await rendered.getByText('[图片：模型图片]', { exact: true }).waitFor();
+  assert.equal(await rendered.locator('script, img, iframe, a').count(), 0);
+  assert.equal(await rendered.locator('pre code').textContent(), '<script>示例代码</script>\n');
+  assert.equal(await page.evaluate(() => !!window.modelExecuted), false);
+  assert.deepEqual(requests, []);
 }, true));

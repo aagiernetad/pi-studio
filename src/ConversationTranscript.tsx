@@ -1,6 +1,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import ChatMessage from "./ChatMessage";
 
 type TranscriptEntry = {
   id: number;
@@ -186,9 +187,9 @@ export default function ConversationTranscript({
                 <span>Entry #{entry.id}</span>
               </div>
 
-              <pre className="transcript-content">
-                {modelText(entry.model) ?? formatContent(entry.data)}
-              </pre>
+              {modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
+                <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
+                <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
 
               {entry.model !== null &&
                 entry.model !== undefined && (
