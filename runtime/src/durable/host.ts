@@ -14,6 +14,7 @@ import {
   openNodeSqliteStorage,
 } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { configuredProvider, listProviderConfigs } from "./provider-config.js";
+import { installChatPolicy } from "./chat-policy.js";
 
 /**
  * Pi Durable 应用级宿主。
@@ -46,12 +47,18 @@ export class DurableHost {
     // 整个 Runtime 生命周期只创建一次 Models。
     // Provider 管理和 Harness 共享同一个实例。
     const models = builtinModels({ credentials });
+    installChatPolicy(models);
 
     const harness = await Harness.open(
       storage,
       {
         models,
         registry: createRegistry(),
+        settings: {
+          retry: { enabled: false, maxRetries: 0 },
+          stream: { timeoutMs: 60_000, maxRetries: 0, transport: "sse" },
+          compaction: { enabled: false },
+        },
       },
       BACKGROUND_CONTEXT,
     );

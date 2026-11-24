@@ -257,6 +257,48 @@ async fn provider_config_delete(
     .await
 }
 
+#[tauri::command]
+async fn conversation_chat_submit(
+    state: State<'_, RuntimeState>,
+    input: Value,
+) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "conversation.chat.submit", input).await
+}
+
+#[tauri::command]
+async fn conversation_chat_resume(
+    state: State<'_, RuntimeState>,
+    input: Value,
+) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "conversation.chat.resume", input).await
+}
+
+#[tauri::command]
+async fn conversation_chat_status(
+    state: State<'_, RuntimeState>,
+    conversation_id: i64,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "conversation.chat.status",
+        json!({ "conversationId": conversation_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn conversation_chat_abort(
+    state: State<'_, RuntimeState>,
+    conversation_id: i64,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "conversation.chat.abort",
+        json!({ "conversationId": conversation_id }),
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -346,6 +388,10 @@ pub fn run() {
             provider_config_list,
             provider_config_set,
             provider_config_delete,
+            conversation_chat_submit,
+            conversation_chat_resume,
+            conversation_chat_status,
+            conversation_chat_abort,
         ])
         .build(tauri::generate_context!())
         .expect("Failed to build Pi Studio");

@@ -191,6 +191,8 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
       { id: "test-params", method: "provider.test", params: {} },
       { id: "configs", method: "provider.config.list", params: {} },
       { id: "config-params", method: "provider.config.set", params: {} },
+      { id: "chat-params", method: "conversation.chat.submit", params: {} },
+      { id: "resume-params", method: "conversation.chat.resume", params: {} },
     ];
     child.stdin.end(requests.map((request) => JSON.stringify({
       version: 1, kind: "request", ...request,
@@ -203,7 +205,7 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
     }
     const [code] = await closed;
     assert.equal(code, 0);
-    assert.equal(responses.size, 6);
+    assert.equal(responses.size, 8);
     const providers = responses.get("providers");
     assert.ok(providers?.success);
     assert.ok(Array.isArray(providers.result.items));
@@ -224,6 +226,12 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
     const invalidConfig = responses.get("config-params");
     assert.ok(invalidConfig && !invalidConfig.success);
     assert.equal(invalidConfig.error.code, "INVALID_PARAMS");
+    const invalidChat = responses.get("chat-params");
+    assert.ok(invalidChat && !invalidChat.success);
+    assert.equal(invalidChat.error.code, "INVALID_PARAMS");
+    const invalidResume = responses.get("resume-params");
+    assert.ok(invalidResume && !invalidResume.success);
+    assert.equal(invalidResume.error.code, "INVALID_PARAMS");
   } finally {
     if (child.exitCode === null) child.kill();
     await closed;

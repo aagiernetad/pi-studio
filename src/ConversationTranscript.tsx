@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type TranscriptEntry = {
@@ -18,6 +18,7 @@ type TranscriptPage = {
 
 type Props = {
   conversationId: number;
+  revision?: number;
 };
 
 const PAGE_SIZE = 10;
@@ -34,8 +35,25 @@ function formatContent(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? "无内容";
 }
 
+function modelText(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const text: string[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record: Record<string, unknown> = item;
+    if (record.role !== "user" && record.role !== "assistant") continue;
+    if (record.stopReason === "error") { text.push("模型请求失败，请检查凭据、模型权限或网络。"); continue; }
+    if (typeof record.content === "string") text.push(record.content);
+    else if (Array.isArray(record.content)) for (const part of record.content) {
+      if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string") text.push(part.text);
+    }
+  }
+  return text.length ? text.join("\n") : null;
+}
+
 export default function ConversationTranscript({
   conversationId,
+  revision = 0,
 }: Props) {
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [nextCursor, setNextCursor] =
@@ -45,12 +63,15 @@ export default function ConversationTranscript({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const generation = useRef(0);
 
   // 会话变化或手动刷新时，重新加载第一页。
   useEffect(() => {
     let cancelled = false;
+    generation.current += 1;
 
     setLoading(true);
+    setLoadingMore(false);
     setEntries([]);
     setNextCursor(null);
     setError("");
@@ -78,7 +99,7 @@ export default function ConversationTranscript({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, refreshKey]);
+  }, [conversationId, refreshKey, revision]);
 
   async function loadMore() {
     if (
@@ -90,6 +111,7 @@ export default function ConversationTranscript({
     }
 
     setLoadingMore(true);
+    const currentGeneration = generation.current;
     setError("");
 
     try {
@@ -102,6 +124,7 @@ export default function ConversationTranscript({
         },
       );
 
+      if (currentGeneration !== generation.current) return;
       setEntries((previous) => [
         ...previous,
         ...page.items,
@@ -109,9 +132,10 @@ export default function ConversationTranscript({
 
       setNextCursor(page.nextCursor);
     } catch (cause) {
+      if (currentGeneration !== generation.current) return;
       setError(`加载更早记录失败：${String(cause)}`);
     } finally {
-      setLoadingMore(false);
+      if (currentGeneration === generation.current) setLoadingMore(false);
     }
   }
 
@@ -158,12 +182,12 @@ export default function ConversationTranscript({
               key={entry.id}
             >
               <div className="transcript-entry-header">
-                <strong>{entry.kind}</strong>
+                <strong>{entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "你" : entry.kind === "pi.assistant" ? "助手" : entry.kind}</strong>
                 <span>Entry #{entry.id}</span>
               </div>
 
               <pre className="transcript-content">
-                {formatContent(entry.data)}
+                {modelText(entry.model) ?? formatContent(entry.data)}
               </pre>
 
               {entry.model !== null &&

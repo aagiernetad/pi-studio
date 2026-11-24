@@ -11,6 +11,7 @@ import { registerProviderCredentialHandlers } from "./handlers/provider-credenti
 import { registerProviderTestHandlers } from "./handlers/provider-test.js";
 import { createSystemCredentialStore } from "./credentials/system-store.js";
 import { registerProviderConfigHandlers } from "./handlers/provider-config.js";
+import { registerChatHandlers } from "./durable/chat-handlers.js";
 
 import { JsonlServer } from "./server/jsonl-server.js";
 
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
 
     // 正式 Conversation IPC
     registerConversationHandlers(registry, durableHost);
+    registerChatHandlers(registry, durableHost);
 
     const dispatcher = new RuntimeRequestDispatcher(registry);
 

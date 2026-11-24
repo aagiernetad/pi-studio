@@ -12,11 +12,13 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function fixture(run) {
+async function fixture(run, withChat = false) {
   const context = await browser.newContext();
   try {
-    await context.addInitScript(() => {
-      const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0 };
+    await context.addInitScript((chat) => {
+      const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
+        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [] };
+      const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
       window.__TAURI_INTERNALS__ = {
         transformCallback: () => 1,
@@ -24,7 +26,49 @@ async function fixture(run) {
           state.calls.push(command);
           if (command.startsWith("plugin:event|")) return 1;
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
-          if (command === "conversation_list") return { items: [], nextCursor: null };
+          if (command === "conversation_list") return { items: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [], nextBeforeId: null };
+          if (command === "conversation_entries") {
+            if (args.cursor && state.holdOlder) return new Promise(resolve => { state.releaseOlder = () => resolve({ items: [{ id: 99, kind: "probe", data: "不应混入的旧页", model: null }], nextCursor: null }); });
+            return { items: [...state.entries[args.conversationId]], nextCursor: state.paginated ? { before: 1 } : null };
+          }
+          if (command === "conversation_chat_status") {
+            const result = structuredClone(chatStatus(args.conversationId));
+            if (state.holdStatus === args.conversationId) await new Promise(resolve => { state.releaseStatus = resolve; });
+            return result;
+          }
+          if (command === "conversation_chat_submit") {
+            const input = args.input;
+            state.submitArgs.push(structuredClone(input));
+            if (state.submissions[input.requestId]) return { submissionId: state.submissions[input.requestId] };
+            const id = Object.keys(state.submissions).length + 1;
+            state.submissions[input.requestId] = id;
+            const current = chatStatus(input.conversationId);
+            current.model = { providerId: input.providerId, modelId: input.modelId };
+            current.running = !!state.slowChat;
+            current.canResume = false;
+            current.partialText = state.slowChat ? "正在回复" : "";
+            current.latestEntryId = id * 2;
+            state.entries[input.conversationId] = [
+              ...(state.slowChat ? [] : [{ id: id * 2, kind: "pi.assistant", data: null, model: [{ role: "assistant", content: [{ type: "text", text: "本地页面回复" }], stopReason: "stop" }] }]),
+              { id: id * 2 - 1, kind: "studio.chat-input", data: {}, model: [{ role: "user", content: input.content }] },
+            ];
+            if (state.failSubmitOnce) { state.failSubmitOnce = false; throw "IPC_TIMEOUT: synthetic-private-marker"; }
+            return { submissionId: id };
+          }
+          if (command === "conversation_chat_resume") {
+            const input = args.input;
+            state.resumeArgs.push(structuredClone(input));
+            if (state.submissions[input.requestId]) return { submissionId: state.submissions[input.requestId] };
+            const current = chatStatus(input.conversationId);
+            if (!current.canResume) throw "CHAT_NOT_RESUMABLE: no failed answer";
+            const id = Object.keys(state.submissions).length + 1;
+            state.submissions[input.requestId] = id;
+            Object.assign(current, { running: false, canResume: false, failureReason: null, partialText: "", latestEntryId: 100 + id });
+            state.entries[input.conversationId].unshift({ id: 100 + id, kind: "pi.assistant", data: null, model: [{ role: "assistant", content: [{ type: "text", text: "继续后的回复" }], stopReason: "stop" }] });
+            if (state.resumeLostOnce) { state.resumeLostOnce = false; throw "IPC_TIMEOUT: synthetic-resume-private"; }
+            return { submissionId: id };
+          }
+          if (command === "conversation_chat_abort") { Object.assign(chatStatus(args.conversationId), { running: false, partialText: "", failureReason: "aborted", canResume: true }); return { stopped: true }; }
           if (command === "provider_list") return { items: [
             { id: "deepseek", name: "DeepSeek", supportsApiKey: true },
             { id: "other", name: "Other", supportsApiKey: true },
@@ -39,7 +83,7 @@ async function fixture(run) {
           if (command === "provider_config_delete") { delete state.configs[args.providerId]; return { deleted: true }; }
           if (command === "model_list") {
             if (args.providerId === "deepseek" && state.delay) await new Promise(r => setTimeout(r, state.delay));
-            return { items: [{ id: state.configs[args.providerId]?.modelId ?? args.providerId + "-model", name: args.providerId, contextWindow: 64000, maxTokens: 4096, supportsConnectionTest: args.providerId !== "oauth" }] };
+            return { items: [{ id: state.configs[args.providerId]?.modelId ?? args.providerId + "-model", name: args.providerId, api: "openai-completions", contextWindow: 64000, maxTokens: 4096, supportsConnectionTest: args.providerId !== "oauth" }] };
           }
           const status = () => ({ providerId: args.providerId, stored: !!state.stored[args.providerId], type: state.stored[args.providerId] ? "api_key" : null });
           if (command === "provider_credential_status") return status();
@@ -54,7 +98,7 @@ async function fixture(run) {
           throw "Unexpected command: " + command;
         },
       };
-    });
+    }, withChat);
     const page = await context.newPage();
     await page.goto(url);
     await page.getByText("服务商设置", { exact: true }).click();
@@ -153,3 +197,81 @@ test("自定义配置新建、编辑和删除接入现有服务商列表，删�
   assert.equal(await panel.getByLabel("服务商").locator('option[value="custom-ui"]').count(), 0);
   assert.equal(await page.evaluate(() => window.fixture.calls.includes("provider_test")), false);
 }));
+
+test("聊天超时重试保留同一请求，历史直接显示消息正文", async () => fixture(async (page) => {
+  const chat = page.locator('.chat-panel');
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]')?.disabled);
+  await page.evaluate(() => { window.fixture.failSubmitOnce = true; });
+  await chat.getByLabel('消息内容').fill('页面聊天消息');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await chat.getByRole('button', { name: '重试同一请求', exact: true }).waitFor();
+  assert.equal(await chat.getByLabel('消息内容').isDisabled(), true);
+  assert.equal((await chat.innerText()).includes('synthetic-private-marker'), false);
+  await chat.getByRole('button', { name: '重试同一请求', exact: true }).click();
+  await page.locator('.transcript-list').getByText('本地页面回复', { exact: true }).waitFor();
+  const args = await page.evaluate(() => window.fixture.submitArgs);
+  assert.equal(args.length, 2);
+  assert.equal(args[0].requestId, args[1].requestId);
+  assert.equal(await page.evaluate(() => Object.keys(window.fixture.submissions).length), 1);
+  assert.equal(await chat.getByLabel('消息内容').inputValue(), '');
+}, true));
+
+test("切换会话不终止原生成，迟到状态不覆盖当前会话，返回后可停止", async () => fixture(async (page) => {
+  const chat = page.locator('.chat-panel');
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]')?.disabled);
+  await page.evaluate(() => { window.fixture.slowChat = true; });
+  await chat.getByLabel('消息内容').fill('慢速消息');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await chat.getByText('正在生成回复...', { exact: true }).waitFor();
+  await page.evaluate(() => { window.fixture.holdStatus = 1; });
+  await page.waitForFunction(() => typeof window.fixture.releaseStatus === 'function');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]')?.disabled);
+  await page.evaluate(() => { window.fixture.holdStatus = null; window.fixture.releaseStatus(); });
+  assert.equal(await chat.getByLabel('消息内容').isEnabled(), true);
+  assert.equal(await page.evaluate(() => window.fixture.calls.filter(c => c === 'conversation_chat_abort').length), 0);
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  await chat.getByText('正在生成回复...', { exact: true }).waitFor();
+  await chat.getByRole('button', { name: '停止生成', exact: true }).click();
+  await chat.getByText('生成已停止，已产生的历史会保留。', { exact: true }).waitFor();
+  assert.equal(await chat.getByLabel('消息内容').isEnabled(), true);
+}, true));
+
+test("新消息刷新历史时，旧分页请求不能混入新首页", async () => fixture(async (page) => {
+  await page.evaluate(() => { window.fixture.paginated = true; window.fixture.holdOlder = true; });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  await page.getByRole('button', { name: '加载更早记录', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseOlder === 'function');
+  const chat = page.locator('.chat-panel');
+  await chat.getByLabel('消息内容').fill('刷新历史的消息');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.locator('.transcript-list').getByText('本地页面回复', { exact: true }).waitFor();
+  await page.evaluate(() => window.fixture.releaseOlder());
+  assert.equal(await page.getByText('不应混入的旧页', { exact: true }).count(), 0);
+}, true));
+
+test("停止后可继续原上下文，超时重试沿用继续请求且保留未发送草稿", async () => fixture(async (page) => {
+  const chat = page.locator('.chat-panel');
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]')?.disabled);
+  await page.evaluate(() => { window.fixture.slowChat = true; });
+  await chat.getByLabel('消息内容').fill('准备停止后继续');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await chat.getByText('正在生成回复...', { exact: true }).waitFor();
+  await chat.getByRole('button', { name: '停止生成', exact: true }).click();
+  await chat.getByRole('button', { name: '继续上次生成', exact: true }).waitFor();
+  await chat.getByLabel('消息内容').fill('尚未发送的下一条草稿');
+  await page.evaluate(() => { window.fixture.resumeLostOnce = true; });
+  await chat.getByRole('button', { name: '继续上次生成', exact: true }).click();
+  await chat.getByRole('button', { name: '重试同一继续请求', exact: true }).waitFor();
+  assert.equal(await chat.getByLabel('消息内容').isDisabled(), true);
+  assert.equal((await chat.innerText()).includes('synthetic-resume-private'), false);
+  await chat.getByRole('button', { name: '重试同一继续请求', exact: true }).click();
+  await page.locator('.transcript-list').getByText('继续后的回复', { exact: true }).waitFor();
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]')?.disabled);
+  assert.equal(await chat.getByLabel('消息内容').inputValue(), '尚未发送的下一条草稿');
+  assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 1);
+  const args = await page.evaluate(() => window.fixture.resumeArgs);
+  assert.equal(args.length, 2);
+  assert.equal(args[0].requestId, args[1].requestId);
+  assert.equal(await chat.getByRole('button', { name: '继续上次生成', exact: true }).count(), 0);
+}, true));

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ConversationTranscript from "./ConversationTranscript";
+import ConversationChat from "./ConversationChat";
 
 type UserConversation = {
   id: number;
@@ -37,6 +38,7 @@ export default function ConversationPanel() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [error, setError] = useState("");
+  const [transcriptRevision, setTranscriptRevision] = useState(0);
 
   // 创建请求失败时，保留原来的业务 requestId。
   // 再次点击创建会重试同一个请求，而不是生成新会话。
@@ -269,9 +271,12 @@ export default function ConversationPanel() {
                 ).toLocaleString("zh-CN")}
               </p>
 
+              <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id}
+                onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
               <ConversationTranscript
                   key={selected.id}
                   conversationId={selected.id}
+                  revision={transcriptRevision}
                />
             </>
           ) : (
