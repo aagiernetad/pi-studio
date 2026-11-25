@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import ConversationTranscript from "./ConversationTranscript";
 import ConversationChat from "./ConversationChat";
 import ConversationTitleEditor from "./ConversationTitleEditor";
+import ConversationUsage from "./ConversationUsage";
 
 type UserConversation = {
   id: number;
@@ -308,6 +309,7 @@ export default function ConversationPanel() {
 
               <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id}
                 onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
+              <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
               <ConversationTranscript
                   key={selected.id}
                   conversationId={selected.id}

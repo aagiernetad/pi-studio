@@ -18,7 +18,7 @@ async function fixture(run, withChat = false) {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
         entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [],
-        conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
+        usages: {}, conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
       const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
       window.__TAURI_INTERNALS__ = {
@@ -42,6 +42,14 @@ async function fixture(run, withChat = false) {
             item.title = args.title;
             if (state.failRenameOnce) { state.failRenameOnce = false; throw 'IPC_TIMEOUT: synthetic-rename-private'; }
             return { conversation: structuredClone(item) };
+          }
+          if (command === "conversation_usage") {
+            const all = (state.usages[args.conversationId] ?? []).filter(item => !args.afterModel || item.model > args.afterModel);
+            const items = structuredClone(all.slice(0, args.limit ?? 20));
+            const result = { items, nextAfterModel: all.length > items.length ? items.at(-1).model : null };
+            if (args.afterModel && state.holdUsagePage) return new Promise(resolve => { state.releaseUsagePage = () => resolve(result); });
+            if (!args.afterModel && state.holdUsageFor === args.conversationId) return new Promise(resolve => { state.releaseUsage = () => resolve(result); });
+            return result;
           }
           if (command === "conversation_entries") {
             if (args.cursor && state.holdOlder) return new Promise(resolve => { state.releaseOlder = () => resolve({ items: [{ id: 99, kind: "probe", data: "不应混入的旧页", model: null }], nextCursor: null }); });
@@ -401,4 +409,54 @@ test("搜索覆盖未加载的会话，旧列表分页不能混入搜索结果",
   await page.getByRole('button', { name: '搜索', exact: true }).click();
   await page.getByRole('button', { name: /旧页目标/ }).waitFor();
   assert.equal(await page.locator('.conversation-item').count(), 1);
+}, true));
+
+test("用量显示原生累计、缓存和推理明细，生成后刷新且缺失费用不显示免费", async () => fixture(async (page) => {
+  await page.evaluate(() => {
+    window.fixture.usages[1] = [{ model: 'custom-chat/usage-model', inputTokens: 1200, outputTokens: 60,
+      cacheReadTokens: 80, cacheWriteTokens: 0, reasoningTokens: 20, totalTokens: 1340, costUsd: 0.00125 }];
+    window.fixture.usages[2] = [{ model: 'custom-other/no-cost', inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, totalTokens: 0, costUsd: null }];
+  });
+  const usage = page.getByRole('region', { name: '会话用量', exact: true });
+  await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
+  await usage.getByText('1,340', { exact: true }).waitFor();
+  assert.match(await usage.innerText(), /缓存读取 80 · 写入 0 · 推理 20/);
+  assert.equal(await usage.getByText('$0.001250', { exact: true }).count(), 1);
+  await page.evaluate(() => { window.fixture.usages[1][0].outputTokens = 65; window.fixture.usages[1][0].totalTokens = 1345; });
+  await page.getByLabel('消息内容', { exact: true }).fill('刷新累计用量');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await usage.getByText('1,345', { exact: true }).waitFor();
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await usage.getByRole('row').filter({ hasText: 'custom-other/no-cost' }).waitFor();
+  assert.equal(await usage.getByText('未提供估算', { exact: true }).count(), 1);
+  assert.equal((await usage.innerText()).includes('custom-chat/usage-model'), false);
+  assert.equal((await usage.innerText()).includes('$0.000000'), false);
+}, true));
+
+test("新回复刷新用量后旧分页无效，切换会话后迟到用量不能覆盖当前记录", async () => fixture(async (page) => {
+  await page.evaluate(() => {
+    window.fixture.usages[1] = Array.from({ length: 21 }, (_, index) => ({ model: 'model-' + String(index).padStart(3, '0'),
+      inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, totalTokens: 2, costUsd: null }));
+    window.fixture.holdUsagePage = true;
+  });
+  const usage = page.getByRole('region', { name: '会话用量', exact: true });
+  await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
+  await usage.getByRole('button', { name: '加载更多模型用量', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseUsagePage === 'function');
+  await page.evaluate(() => {
+    window.fixture.usages[1] = [{ ...window.fixture.usages[1][0], model: 'new-current-usage', costUsd: 0.00000001 }];
+    window.fixture.statuses[1].latestEntryId = 999;
+  });
+  await usage.getByRole('row').filter({ hasText: 'new-current-usage' }).waitFor();
+  await page.evaluate(() => { window.fixture.releaseUsagePage(); });
+  assert.equal(await usage.locator('tbody tr').count(), 1);
+  assert.equal(await usage.getByText('< $0.000001', { exact: true }).count(), 1);
+  await page.evaluate(() => { window.fixture.holdUsageFor = 1; });
+  await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseUsage === 'function');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await usage.getByText('暂无已记录的模型用量。', { exact: true }).waitFor();
+  await page.evaluate(() => { window.fixture.releaseUsage(); });
+  assert.equal(await usage.getByRole('row').filter({ hasText: 'new-current-usage' }).count(), 0);
 }, true));

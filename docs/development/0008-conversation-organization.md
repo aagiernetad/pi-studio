@@ -32,4 +32,4 @@
 - 正常关闭、重启真实桌面后，新标题、原 Conversation ID、原 Transcript 和 Markdown 渲染均保留，标题搜索正常。全程无模型请求或新凭据；独立凭据命名空间保持 0 项。
 - 测试窗口已正常关闭，正式应用数据未触碰。git diff --check 通过。
 
-建议提交名称：`feat(conversation): 支持会话重命名与标题搜索`。本轮未提交或推送。
+已获用户授权并提交、推送：`13fcf16 feat(conversation): 支持会话重命名与标题搜索`。

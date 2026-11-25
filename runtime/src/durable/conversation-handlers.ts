@@ -1,6 +1,6 @@
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import { UsageDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { z } from "zod";
 
 import { RuntimeApplicationError } from "../protocol/errors.js";
@@ -42,6 +42,15 @@ const EntriesParams = z.object({
   // Durable 原生 Storage Cursor，属于不透明 JSON 对象
   cursor: z.record(z.string(), z.json()).optional(),
 }).strict();
+
+const UsageParams = z.object({
+  conversationId: z.number().int().positive(),
+  limit: z.number().int().min(1).max(50).default(20),
+  afterModel: z.string().min(1).max(1024).optional(),
+}).strict();
+
+const tokenCount = (value: number | undefined): number | null =>
+  value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : null;
 
 function invalidParams(method: string): RuntimeApplicationError {
   return new RuntimeApplicationError(
@@ -94,6 +103,31 @@ export function registerConversationHandlers(
     );
     context.emit("conversation.renamed", { conversationId: conversation.id });
     return { conversation };
+  });
+
+  registry.register("conversation.usage", async (request) => {
+    const parsed = UsageParams.safeParse(request.params);
+    if (!parsed.success) throw invalidParams("conversation.usage");
+    const { conversationId, limit, afterModel } = parsed.data;
+    if (!await getUserConversation(host.harness, conversationId) || !await host.conversation(conversationId as ConversationId)) {
+      throw new RuntimeApplicationError("CONVERSATION_NOT_FOUND", "Conversation does not exist or is not visible.");
+    }
+    // 原生账本已包含完整历史与失败尝试；这里只做只读投影，不扫描或重新累计 Entry。
+    const usage = await host.harness.snapshot(UsageDoc, conversationId as ConversationId, BACKGROUND_CONTEXT);
+    const models = Object.keys(usage?.models ?? {}).sort().filter((key) => afterModel === undefined || key > afterModel);
+    const page = models.slice(0, limit);
+    return {
+      items: page.map((model) => {
+        const value = usage!.models[model]!;
+        return {
+          model, inputTokens: tokenCount(value.input), outputTokens: tokenCount(value.output),
+          cacheReadTokens: tokenCount(value.cacheRead), cacheWriteTokens: tokenCount(value.cacheWrite),
+          reasoningTokens: tokenCount(value.reasoning), totalTokens: tokenCount(value.totalTokens),
+          costUsd: Number.isFinite(value.cost.total) && value.cost.total > 0 ? value.cost.total : null,
+        };
+      }),
+      nextAfterModel: models.length > page.length ? page.at(-1) ?? null : null,
+    };
   });
 
   registry.register("conversation.get", async (request) => {

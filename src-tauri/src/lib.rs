@@ -133,6 +133,20 @@ async fn conversation_rename(
     .await
 }
 
+#[tauri::command]
+async fn conversation_usage(
+    state: State<'_, RuntimeState>,
+    conversation_id: i64,
+    limit: Option<u32>,
+    after_model: Option<String>,
+) -> Result<Value, String> {
+    let mut params = json!({ "conversationId": conversation_id, "limit": limit.unwrap_or(20) });
+    if let Some(after_model) = after_model {
+        params["afterModel"] = json!(after_model);
+    }
+    call_runtime(state.client.clone(), "conversation.usage", params).await
+}
+
 /// 根据 ID 查询用户可见的会话。
 #[tauri::command]
 async fn conversation_get(
@@ -397,6 +411,7 @@ pub fn run() {
             conversation_create,
             conversation_list,
             conversation_rename,
+            conversation_usage,
             conversation_get,
             conversation_entries,
             provider_list,
