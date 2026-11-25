@@ -4,6 +4,7 @@ import {
   defineDoc,
   type Harness,
 } from "@earendil-works/pi-durable";
+import { RuntimeApplicationError } from "../protocol/errors.js";
 
 export type UserConversation  = {
   id: number;
@@ -95,6 +96,7 @@ export async function listUserConversations(
   harness: Harness,
   limit = 20,
   beforeId?: number,
+  query = "",
 ): Promise<{
   items: UserConversation[];
   nextBeforeId: number | null;
@@ -105,6 +107,7 @@ export async function listUserConversations(
   );
 
   const sorted = Object.values(index?.items ?? {})
+    .filter((item) => item.title.toLowerCase().includes(query.toLowerCase()))
     .filter((item) =>
       beforeId === undefined || item.id < beforeId
     )
@@ -138,4 +141,23 @@ export async function getUserConversation(
   );
 
   return index?.items[String(id)] ?? null;
+}
+
+/** 仅修改 Studio 标题；不改变 Durable Conversation、Entries 或创建幂等键。 */
+export async function renameUserConversation(
+  harness: Harness,
+  id: number,
+  title: string,
+  signal?: AbortSignal,
+): Promise<UserConversation> {
+  return harness.commit(async (tx) => {
+    const index = await tx.doc(UserConversations);
+    const conversation = index.items[String(id)];
+    if (!conversation) {
+      throw new RuntimeApplicationError("CONVERSATION_NOT_FOUND", "Conversation does not exist or is not visible.");
+    }
+    signal?.throwIfAborted();
+    conversation.title = title;
+    return { id: conversation.id, title: conversation.title, createdAt: conversation.createdAt };
+  }, BACKGROUND_CONTEXT);
 }

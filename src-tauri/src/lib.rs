@@ -102,6 +102,7 @@ async fn conversation_list(
     state: State<'_, RuntimeState>,
     limit: Option<u32>,
     before_id: Option<i64>,
+    query: Option<String>,
 ) -> Result<Value, String> {
     let mut params = json!({
         "limit": limit.unwrap_or(20)
@@ -111,7 +112,25 @@ async fn conversation_list(
         params["beforeId"] = json!(before_id);
     }
 
+    if let Some(query) = query {
+        params["query"] = json!(query);
+    }
+
     call_runtime(state.client.clone(), "conversation.list", params).await
+}
+
+#[tauri::command]
+async fn conversation_rename(
+    state: State<'_, RuntimeState>,
+    conversation_id: i64,
+    title: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "conversation.rename",
+        json!({ "conversationId": conversation_id, "title": title }),
+    )
+    .await
 }
 
 /// 根据 ID 查询用户可见的会话。
@@ -377,6 +396,7 @@ pub fn run() {
             runtime_info,
             conversation_create,
             conversation_list,
+            conversation_rename,
             conversation_get,
             conversation_entries,
             provider_list,

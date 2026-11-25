@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ConversationTranscript from "./ConversationTranscript";
 import ConversationChat from "./ConversationChat";
+import ConversationTitleEditor from "./ConversationTitleEditor";
 
 type UserConversation = {
   id: number;
@@ -29,6 +30,11 @@ export default function ConversationPanel() {
     null,
   );
   const [title, setTitle] = useState("");
+  const [searchDraft, setSearchDraft] = useState("");
+  const [query, setQuery] = useState("");
+  const [notice, setNotice] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const listGeneration = useRef(0);
   const [nextBeforeId, setNextBeforeId] = useState<number | null>(
     null,
   );
@@ -49,11 +55,14 @@ export default function ConversationPanel() {
 
   useEffect(() => {
     let cancelled = false;
+    listGeneration.current += 1;
 
     setLoading(true);
+    setLoadingMore(false);
 
     void invoke<ConversationListResult>("conversation_list", {
       limit: PAGE_SIZE,
+      query,
     })
       .then((page) => {
         if (cancelled) return;
@@ -82,11 +91,12 @@ export default function ConversationPanel() {
 
     return () => {
       cancelled = true;
+      listGeneration.current += 1;
     };
-  }, [refreshKey]);
+  }, [refreshKey, query]);
 
   async function createConversation() {
-    if (creating || loading) return;
+    if (creating || loading || renaming) return;
 
     if (!pendingCreate.current) {
       pendingCreate.current = {
@@ -118,6 +128,8 @@ export default function ConversationPanel() {
 
       setSelectedId(created.id);
       setTitle("");
+      setSearchDraft("");
+      setQuery("");
       pendingCreate.current = null;
     } catch (cause) {
       setError(
@@ -129,11 +141,12 @@ export default function ConversationPanel() {
   }
 
   async function loadMore() {
-    if (nextBeforeId === null || loadingMore || creating) {
+    if (nextBeforeId === null || loading || loadingMore || creating || renaming) {
       return;
     }
 
     setLoadingMore(true);
+    const generation = listGeneration.current;
     setError("");
 
     try {
@@ -142,9 +155,11 @@ export default function ConversationPanel() {
         {
           limit: PAGE_SIZE,
           beforeId: nextBeforeId,
+          query,
         },
       );
 
+      if (generation !== listGeneration.current) return;
       setConversations((previous) => {
         const knownIds = new Set(previous.map((item) => item.id));
 
@@ -156,9 +171,10 @@ export default function ConversationPanel() {
 
       setNextBeforeId(page.nextBeforeId);
     } catch (cause) {
+      if (generation !== listGeneration.current) return;
       setError(`加载更多会话失败：${String(cause)}`);
     } finally {
-      setLoadingMore(false);
+      if (generation === listGeneration.current) setLoadingMore(false);
     }
   }
 
@@ -172,7 +188,7 @@ export default function ConversationPanel() {
         <h2>我的会话</h2>
         <button
           type="button"
-          disabled={loading || creating || loadingMore}
+          disabled={loading || creating || loadingMore || renaming}
           onClick={() => {
             setError("");
             setRefreshKey((value) => value + 1);
@@ -195,7 +211,7 @@ export default function ConversationPanel() {
         <button
           type="button"
           className="primary"
-          disabled={creating || loading}
+          disabled={creating || loading || renaming}
           onClick={() => void createConversation()}
         >
           {creating ? "创建中..." : "＋ 新建会话"}
@@ -208,6 +224,18 @@ export default function ConversationPanel() {
         </div>
       )}
 
+      <form className="conversation-create" role="search" aria-label="搜索会话" onSubmit={(event) => {
+        event.preventDefault(); setError(""); setNotice(""); setQuery(searchDraft.trim());
+      }}>
+        <input aria-label="搜索会话标题" placeholder="按标题搜索全部会话" value={searchDraft} maxLength={120}
+          disabled={creating || renaming} onChange={(event) => setSearchDraft(event.target.value)} />
+        <button type="submit" disabled={creating || renaming}>搜索</button>
+        <button type="button" disabled={creating || renaming || (!searchDraft && !query)} onClick={() => {
+          setSearchDraft(""); setQuery(""); setError(""); setNotice("");
+        }}>清除搜索</button>
+      </form>
+      {notice && <p className="provider-notice" role="status">{notice}</p>}
+
       <div className="conversation-layout">
         <div className="conversation-sidebar">
           <div className="conversation-label">会话列表</div>
@@ -215,7 +243,7 @@ export default function ConversationPanel() {
           {loading ? (
             <p className="muted">正在加载会话...</p>
           ) : conversations.length === 0 ? (
-            <p className="muted">还没有会话，可以创建一个。</p>
+            <p className="muted">{query ? "没有匹配标题的会话。" : "还没有会话，可以创建一个。"}</p>
           ) : (
             <div className="conversation-list">
               {conversations.map((conversation) => (
@@ -246,7 +274,7 @@ export default function ConversationPanel() {
             <button
               type="button"
               className="conversation-more"
-              disabled={loadingMore || creating}
+              disabled={loading || loadingMore || creating || renaming}
               onClick={() => void loadMore()}
             >
               {loadingMore ? "加载中..." : "加载更多"}
@@ -258,7 +286,14 @@ export default function ConversationPanel() {
           {selected ? (
             <>
               <div className="conversation-label">当前会话</div>
-              <h3>{selected.title}</h3>
+              <ConversationTitleEditor key={`title-${selected.id}`} conversation={selected}
+                disabled={loading || loadingMore || creating} onSavingChange={setRenaming} onRenamed={(renamed) => {
+                const matches = renamed.title.toLowerCase().includes(query.toLowerCase());
+                setConversations((previous) => previous.map((item) => item.id === renamed.id ? renamed : item)
+                  .filter((item) => item.id !== renamed.id || matches));
+                if (!matches) setSelectedId(null);
+                setNotice(matches ? "会话标题已更新。" : "标题已更新；该会话不再匹配当前搜索，可清除搜索查看。");
+              }} />
 
               <p className="muted">
                 Conversation ID：{selected.id}

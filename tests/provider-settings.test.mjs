@@ -17,7 +17,8 @@ async function fixture(run, withChat = false) {
   try {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
-        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [] };
+        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [],
+        conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
       const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
       window.__TAURI_INTERNALS__ = {
@@ -27,10 +28,24 @@ async function fixture(run, withChat = false) {
           if (command.startsWith("plugin:event|")) return 1;
           if (command === "plugin:opener|open_url") { state.openedUrl = args.url; return; }
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
-          if (command === "conversation_list") return { items: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [], nextBeforeId: null };
+          if (command === "conversation_list") {
+            const all = state.conversations.filter(item => (!args.beforeId || item.id < args.beforeId) && item.title.toLowerCase().includes((args.query ?? '').toLowerCase()));
+            const items = structuredClone(all.slice(0, args.limit ?? 20));
+            const result = { items, nextBeforeId: all.length > items.length ? items.at(-1).id : null };
+            if (args.beforeId && state.holdConversationPage) return new Promise(resolve => { state.releaseConversationPage = () => resolve(result); });
+            return result;
+          }
+          if (command === "conversation_rename") {
+            state.renameArgs.push(structuredClone(args));
+            const item = state.conversations.find(item => item.id === args.conversationId);
+            if (state.holdRename) await new Promise(resolve => { state.releaseRename = resolve; });
+            item.title = args.title;
+            if (state.failRenameOnce) { state.failRenameOnce = false; throw 'IPC_TIMEOUT: synthetic-rename-private'; }
+            return { conversation: structuredClone(item) };
+          }
           if (command === "conversation_entries") {
             if (args.cursor && state.holdOlder) return new Promise(resolve => { state.releaseOlder = () => resolve({ items: [{ id: 99, kind: "probe", data: "不应混入的旧页", model: null }], nextCursor: null }); });
-            return { items: [...state.entries[args.conversationId]], nextCursor: state.paginated ? { before: 1 } : null };
+            return { items: [...(state.entries[args.conversationId] ?? [])], nextCursor: state.paginated ? { before: 1 } : null };
           }
           if (command === "conversation_chat_status") {
             const result = structuredClone(chatStatus(args.conversationId));
@@ -321,4 +336,69 @@ test("模型内容不能执行 HTML 或危险链接，也不会自动加载远�
   assert.equal(await rendered.locator('pre code').textContent(), '<script>示例代码</script>\n');
   assert.equal(await page.evaluate(() => !!window.modelExecuted), false);
   assert.deepEqual(requests, []);
+}, true));
+
+test("重命名失败可重试，标题搜索与清除搜索显示正确会话", async () => fixture(async (page) => {
+  await page.getByLabel('消息内容', { exact: true }).fill('重命名时保留的聊天草稿');
+  await page.getByRole('button', { name: '重命名', exact: true }).click();
+  const title = page.getByLabel('新的会话标题', { exact: true });
+  await title.fill('   ');
+  assert.equal(await page.getByRole('button', { name: '保存标题', exact: true }).isDisabled(), true);
+  await title.fill('计划 Plan');
+  await page.evaluate(() => { window.fixture.failRenameOnce = true; });
+  await page.getByRole('button', { name: '保存标题', exact: true }).click();
+  await page.getByText('标题保存结果尚未确认，可重试相同标题，或刷新列表核对。', { exact: true }).waitFor();
+  assert.equal((await page.locator('.conversation-title-editor').innerText()).includes('synthetic-rename-private'), false);
+  await page.getByRole('button', { name: '保存标题', exact: true }).click();
+  await page.locator('.conversation-detail').getByRole('heading', { name: '计划 Plan', exact: true }).waitFor();
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '重命名时保留的聊天草稿');
+  assert.deepEqual(await page.evaluate(() => window.fixture.renameArgs), [
+    { conversationId: 1, title: '计划 Plan' }, { conversationId: 1, title: '计划 Plan' },
+  ]);
+  await page.getByLabel('搜索会话标题', { exact: true }).fill('pLaN');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.conversation-item').length === 1);
+  assert.match(await page.locator('.conversation-item').innerText(), /计划 Plan/);
+  await page.getByLabel('搜索会话标题', { exact: true }).fill('没有的标题');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.getByText('没有匹配标题的会话。', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '清除搜索', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.conversation-item').length === 2);
+}, true));
+
+test("保存标题时切换会话，迟到结果不能改变当前会话", async () => fixture(async (page) => {
+  await page.evaluate(() => { window.fixture.holdRename = true; });
+  await page.getByRole('button', { name: '重命名', exact: true }).click();
+  await page.getByLabel('新的会话标题', { exact: true }).fill('甲的迟到标题');
+  await page.getByRole('button', { name: '保存标题', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseRename === 'function');
+  assert.equal(await page.getByRole('button', { name: '搜索', exact: true }).isDisabled(), true);
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.evaluate(() => { window.fixture.releaseRename(); });
+  await page.locator('.conversation-detail').getByRole('heading', { name: '会话乙', exact: true }).waitFor();
+  assert.equal(await page.locator('.conversation-detail').getByText('甲的迟到标题', { exact: true }).count(), 0);
+  await page.getByRole('button', { name: '刷新列表', exact: true }).click();
+  await page.getByRole('button', { name: /甲的迟到标题/ }).waitFor();
+  assert.equal(await page.locator('.conversation-detail').getByRole('heading', { name: '会话乙', exact: true }).count(), 1);
+}, true));
+
+test("搜索覆盖未加载的会话，旧列表分页不能混入搜索结果", async () => fixture(async (page) => {
+  await page.evaluate(() => {
+    window.fixture.conversations = Array.from({ length: 21 }, (_, index) => ({
+      id: 21 - index, createdAt: index + 1, title: index === 20 ? '旧页目标' : index === 11 ? '查找目标' : '普通会话 ' + (21 - index),
+    }));
+    window.fixture.holdConversationPage = true;
+  });
+  await page.getByRole('button', { name: '刷新列表', exact: true }).click();
+  await page.getByRole('button', { name: '加载更多', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseConversationPage === 'function');
+  await page.getByLabel('搜索会话标题', { exact: true }).fill('查找');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.conversation-item').length === 1);
+  await page.evaluate(() => { window.fixture.releaseConversationPage(); });
+  assert.match(await page.locator('.conversation-item').innerText(), /查找目标/);
+  await page.getByLabel('搜索会话标题', { exact: true }).fill('旧页');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.getByRole('button', { name: /旧页目标/ }).waitFor();
+  assert.equal(await page.locator('.conversation-item').count(), 1);
 }, true));

@@ -11,6 +11,7 @@ import {
   createUserConversation,
   getUserConversation,
   listUserConversations,
+  renameUserConversation,
 } from "./conversations.js";
 
 const CreateParams = z.object({
@@ -22,6 +23,12 @@ const CreateParams = z.object({
 const ListParams = z.object({
   limit: z.number().int().min(1).max(100).default(20),
   beforeId: z.number().int().positive().optional(),
+  query: z.string().trim().max(120).default(""),
+}).strict();
+
+const RenameParams = z.object({
+  conversationId: z.number().int().positive(),
+  title: z.string().trim().min(1).max(120),
 }).strict();
 
 const GetParams = z.object({
@@ -75,7 +82,18 @@ export function registerConversationHandlers(
       host.harness,
       parsed.data.limit,
       parsed.data.beforeId,
+      parsed.data.query,
     );
+  });
+
+  registry.register("conversation.rename", async (request, context) => {
+    const parsed = RenameParams.safeParse(request.params);
+    if (!parsed.success) throw invalidParams("conversation.rename");
+    const conversation = await renameUserConversation(
+      host.harness, parsed.data.conversationId, parsed.data.title, context.signal,
+    );
+    context.emit("conversation.renamed", { conversationId: conversation.id });
+    return { conversation };
   });
 
   registry.register("conversation.get", async (request) => {
