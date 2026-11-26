@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import ConversationPanel from "./ConversationPanel";
 import ProviderSettings from "./ProviderSettings";
 import "./App.css";
+import "./workspace.css";
 
 interface RuntimeInfo {
   name: string;
@@ -140,20 +141,21 @@ function App() {
   }
 
   return (
-    <main className="studio">
+    <main className={"studio studio-" + page}>
+      <div className="app-topbar">
       <header className="header">
         <div>
-          <h1>Pi Studio</h1>
+          <h1><span className="brand-mark" aria-hidden="true">π</span> Pi Studio</h1>
           <p>本地优先的智能工作空间</p>
         </div>
 
         <div className={`status ${status}`}>
           <span className="status-dot" />
           {status === "online"
-            ? "运行时已连接"
+            ? "已连接"
             : status === "checking"
-              ? "正在连接运行时"
-              : "运行时未连接"}
+              ? "连接中"
+              : "未连接"}
         </div>
       </header>
 
@@ -166,11 +168,11 @@ function App() {
           aria-current={page === key ? "page" : undefined} aria-controls={target}
           disabled={settingsBusy} onClick={() => navigate(key)}>{label}</button>)}
       </nav>
+      </div>
 
       <section id="studio-conversations" aria-labelledby="conversations-heading" hidden={page !== "conversations"}>
-        <div className="workspace-heading"><h2 id="conversations-heading">会话工作台</h2>
-          <p className="muted">继续已有会话，或新建会话开始一个方向。</p></div>
-        <ConversationPanel catalogRevision={catalogRevision} />
+        <h2 id="conversations-heading" className="sr-only">会话工作台</h2>
+        <ConversationPanel catalogRevision={catalogRevision} onOpenProviders={() => navigate("providers")} />
       </section>
       <section id="studio-providers" aria-labelledby="providers-heading" hidden={page !== "providers"}>
         <div className="workspace-heading"><h2 id="providers-heading">服务商与模型</h2>

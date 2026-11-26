@@ -24,7 +24,7 @@ type ConversationCreateResult = {
 
 const PAGE_SIZE = 20;
 
-export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevision?: number }) {
+export default function ConversationPanel({ catalogRevision = 0, onOpenProviders }: { catalogRevision?: number; onOpenProviders: () => void }) {
   // 仅保存在当前工作台内存中，不写入浏览器存储、Transcript 或 SQLite。
   const drafts = useRef(new Map<number, ConversationDraft>());
   function updateDraft(id: number, update: DraftUpdate) {
@@ -48,6 +48,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
   const [selectedId, setSelectedId] = useState<number | null>(
     null,
   );
+  const [listOpen, setListOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
@@ -146,6 +147,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
       ]);
 
       setSelectedId(created.id);
+      setListOpen(false);
       setTitle("");
       setSearchDraft("");
       setQuery("");
@@ -202,7 +204,10 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
   );
 
   return (
-    <section className="panel conversation-panel">
+    <section className="conversation-panel" aria-label="会话工作台">
+      <div className={"conversation-layout " + (listOpen ? "list-open" : "")}>
+        <aside className="conversation-sidebar" aria-label="会话列表">
+          <button type="button" className="conversation-drawer-close" onClick={() => setListOpen(false)}>返回对话 →</button>
       <div className="section-heading">
         <h2>我的会话</h2>
         <button
@@ -255,8 +260,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
       </form>
       {notice && <p className="provider-notice" role="status">{notice}</p>}
 
-      <div className="conversation-layout">
-        <div className="conversation-sidebar">
+
           <div className="conversation-label">会话列表</div>
 
           {loading ? (
@@ -268,6 +272,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
               {conversations.map((conversation) => (
                 <button
                   key={conversation.id}
+                  data-conversation-id={conversation.id}
                   type="button"
                   aria-pressed={selectedId === conversation.id}
                   className={
@@ -275,7 +280,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                       ? "conversation-item active"
                       : "conversation-item"
                   }
-                  onClick={() => setSelectedId(conversation.id)}
+                  onClick={() => { setSelectedId(conversation.id); setListOpen(false); }}
                 >
                   <strong>{conversation.title}</strong>
                   <span>
@@ -299,12 +304,12 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
               {loadingMore ? "加载中..." : "加载更多"}
             </button>
           )}
-        </div>
 
+        </aside>
         <div className="conversation-detail">
-          {selected ? (
-            <>
-              <div className="conversation-label">当前会话</div>
+          <button type="button" className="conversation-drawer-toggle" aria-expanded={listOpen} onClick={() => setListOpen(true)}>☰ 会话列表</button>
+          {selected ? <>
+            <header className="conversation-toolbar">
               <ConversationTitleEditor key={`title-${selected.id}`} conversation={selected}
                 disabled={loading || loadingMore || creating} onSavingChange={setRenaming} onRenamed={(renamed) => {
                 const matches = renamed.title.toLowerCase().includes(query.toLowerCase());
@@ -314,6 +319,12 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                 setNotice(matches ? "会话标题已更新。" : "标题已更新；该会话不再匹配当前搜索，可清除搜索查看。");
               }} />
 
+
+              <details key={"inspector-" + selected.id} className="conversation-inspector" onKeyDown={(event) => {
+                if (event.key === "Escape") event.currentTarget.open = false;
+              }}>
+                <summary>详情与用量</summary>
+                <div className="inspector-content">
               <details className="conversation-metadata"><summary>会话信息</summary>
               <p className="muted">
                 Conversation ID：{selected.id}
@@ -329,6 +340,12 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
               </details>
 
               {selected.forkedFrom && <p className="muted">分支来自会话 #{selected.forkedFrom.conversationId} 的回复 #{selected.forkedFrom.entryId}；用量仅统计此分支的新请求。</p>}
+
+              <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
+
+                </div>
+              </details>
+            </header>
               <ConversationTranscript
                   key={selected.id}
                   conversationId={selected.id}
@@ -344,16 +361,21 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                     setNotice("分支会话已创建，可以从这条回复继续新的方向。原会话已保留。");
                   }}
                />
+
               <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id} catalogRevision={catalogRevision}
                 draft={drafts.current.get(selected.id)} onDraftUpdate={(update) => updateDraft(selected.id, update)}
                 onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
-              <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
-            </>
-          ) : (
-            <div className="conversation-placeholder">
-              请选择或新建一个会话
+
+          </> : <div className="workspace-empty">
+            <span className="empty-symbol" aria-hidden="true">π</span>
+            <h3>从一个想法开始</h3>
+            <p>新建会话，与模型一起梳理问题、编写代码或规划任务。</p>
+            <div className="provider-actions">
+              <button type="button" className="primary" disabled={creating || loading || renaming} onClick={() => void createConversation()}>新建会话</button>
+              <button type="button" onClick={onOpenProviders}>配置服务商</button>
             </div>
-          )}
+            <span className="muted">会话与历史保存在本机。</span>
+          </div>}
         </div>
       </div>
     </section>

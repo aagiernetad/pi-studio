@@ -17,7 +17,7 @@ async function fixture(run, withChat = false) {
   try {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
-        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [], resetArgs: [], forkArgs: [], forks: {},
+        entries: { 1: [], 2: [] }, modelArgs: [], statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [], resetArgs: [], forkArgs: [], forks: {},
         usages: {}, conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
       const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false, contextReset: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
@@ -29,6 +29,13 @@ async function fixture(run, withChat = false) {
           if (command === "plugin:opener|open_url") { state.openedUrl = args.url; return; }
           if (command === "runtime_ping") return { message: args.message, runtime: "test", pid: 1 };
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
+          if (command === "conversation_create") {
+            state.created ??= {};
+            if (state.created[args.requestId]) return { conversation: structuredClone(state.created[args.requestId]) };
+            const item = { id: Math.max(0, ...state.conversations.map(item => item.id)) + 1, title: args.title || '新建会话', createdAt: Date.now() };
+            state.created[args.requestId] = item; state.conversations.unshift(item); state.entries[item.id] = [];
+            return { conversation: structuredClone(item) };
+          }
           if (command === "conversation_list") {
             const all = state.conversations.filter(item => (!args.beforeId || item.id < args.beforeId) && item.title.toLowerCase().includes((args.query ?? '').toLowerCase()));
             const items = structuredClone(all.slice(0, args.limit ?? 20));
@@ -135,6 +142,7 @@ async function fixture(run, withChat = false) {
             if (state.failResetOnce) { state.failResetOnce = false; throw 'IPC_TIMEOUT: synthetic-reset-private'; }
             return { submissionId: id, entryId: 200 + id };
           }
+          if (command === "provider_list" && state.providerDelay) await new Promise(resolve => setTimeout(resolve, state.providerDelay));
           if (command === "provider_list" && state.failProviderList) throw "IPC_TIMEOUT: synthetic-catalog-private";
           if (command === "provider_list" && state.emptyProviderList) return { items: [] };
           if (command === "provider_list") return { items: [
@@ -151,6 +159,7 @@ async function fixture(run, withChat = false) {
           }
           if (command === "provider_config_delete") { delete state.configs[args.providerId]; return { deleted: true }; }
           if (command === "model_list") {
+            state.modelArgs.push(args.providerId);
             if (state.failModelsFor === args.providerId) throw "IPC_TIMEOUT: synthetic-model-private";
             if (state.emptyModelsFor === args.providerId) return { items: [] };
             if (args.providerId === "deepseek" && state.delay) await new Promise(r => setTimeout(r, state.delay));
@@ -473,16 +482,20 @@ test("用量显示原生累计、缓存和推理明细，生成后刷新且缺�
     window.fixture.usages[2] = [{ model: 'custom-other/no-cost', inputTokens: 0, outputTokens: 0,
       cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, totalTokens: 0, costUsd: null }];
   });
+  await page.locator('.conversation-inspector > summary').click();
   const usage = page.getByRole('region', { name: '会话用量', exact: true });
   await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
   await usage.getByText('1,340', { exact: true }).waitFor();
   assert.match(await usage.innerText(), /缓存读取 80 · 写入 0 · 推理 20/);
   assert.equal(await usage.getByText('$0.001250', { exact: true }).count(), 1);
   await page.evaluate(() => { window.fixture.usages[1][0].outputTokens = 65; window.fixture.usages[1][0].totalTokens = 1345; });
+  await page.locator('.conversation-inspector > summary').click();
   await page.getByLabel('消息内容', { exact: true }).fill('刷新累计用量');
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.locator('.conversation-inspector > summary').click();
   await usage.getByText('1,345', { exact: true }).waitFor();
   await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.locator('.conversation-inspector > summary').click();
   await usage.getByRole('row').filter({ hasText: 'custom-other/no-cost' }).waitFor();
   assert.equal(await usage.getByText('未提供估算', { exact: true }).count(), 1);
   assert.equal((await usage.innerText()).includes('custom-chat/usage-model'), false);
@@ -495,6 +508,7 @@ test("新回复刷新用量后旧分页无效，切换会话后迟到用量不�
       inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, totalTokens: 2, costUsd: null }));
     window.fixture.holdUsagePage = true;
   });
+  await page.locator('.conversation-inspector > summary').click();
   const usage = page.getByRole('region', { name: '会话用量', exact: true });
   await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
   await usage.getByRole('button', { name: '加载更多模型用量', exact: true }).click();
@@ -511,6 +525,7 @@ test("新回复刷新用量后旧分页无效，切换会话后迟到用量不�
   await usage.getByRole('button', { name: '刷新用量', exact: true }).click();
   await page.waitForFunction(() => typeof window.fixture.releaseUsage === 'function');
   await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.locator('.conversation-inspector > summary').click();
   await usage.getByText('暂无已记录的模型用量。', { exact: true }).waitFor();
   await page.evaluate(() => { window.fixture.releaseUsage(); });
   assert.equal(await usage.getByRole('row').filter({ hasText: 'new-current-usage' }).count(), 0);
@@ -595,7 +610,9 @@ test("fork UI keeps the same request after a lost reply and opens an independent
     assert.equal((await page.locator('body').innerText()).includes('synthetic-fork-private'), false);
     await page.getByRole('button', { name: '重试创建分支' }).click();
     await page.locator('.conversation-item.active').filter({ hasText: '会话甲（分支）' }).waitFor();
+    await page.locator('.conversation-inspector > summary').click();
     await page.getByText('分支来自会话 #1 的回复 #2；用量仅统计此分支的新请求。', { exact: true }).waitFor();
+    await page.locator('.conversation-inspector > summary').click();
     await page.locator('.transcript-list').getByText('原始回复', { exact: true }).waitFor();
     assert.equal(await page.locator('.transcript-list').getByText('稍后的回复', { exact: true }).count(), 0);
     await page.waitForFunction(() => document.querySelector('[aria-label="对话模型"]')?.value === 'deepseek-model');
@@ -932,3 +949,91 @@ test("发送的迟到确认只清理源草稿，明确拒绝的消息保留为�
   await input.fill('乙可修改后重新发送');
   assert.equal(await page.getByRole('button', { name: '发送消息', exact: true }).isEnabled(), true);
 }, true));
+
+
+test("工作台在桌面和紧凑窗口始终保留输入与发送，长消息和长列表独立滚动", async () => fixture(async (page) => {
+  await page.evaluate(() => {
+    const f = window.fixture;
+    f.conversations = Array.from({ length: 40 }, (_, i) => ({ id: 40-i, title: '会话 ' + (40-i), createdAt: i+1 }));
+    f.entries[40] = Array.from({ length: 20 }, (_, i) => ({ id: i+1, kind: i%2 ? 'pi.assistant' : 'studio.chat-input', data: null,
+      model: [{ role: i%2 ? 'assistant' : 'user', content: ('足够长的实际消息内容\n').repeat(15), stopReason: 'stop' }] }));
+  });
+  await page.getByRole('button', { name: '刷新列表', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.transcript-entry').length === 20);
+  for (const size of [{width:1280,height:800},{width:1000,height:700},{width:705,height:564}]) {
+    await page.setViewportSize(size);
+    await page.locator('.transcript-list').evaluate(el => { el.scrollTop = 0; });
+    const input = await page.getByLabel('消息内容', { exact:true }).boundingBox();
+    const send = await page.getByRole('button', {name:'发送消息',exact:true}).boundingBox();
+    assert.ok(input.y >= 0 && input.y+input.height <= size.height, '输入框须保持在窗口内');
+    assert.ok(send.y >= 0 && send.y+send.height <= size.height, '发送按钮须保持在窗口内');
+    assert.equal(await page.locator('.conversation-sidebar').isVisible(), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight+1), true);
+  }
+  await page.getByRole('button', {name:'回到最新',exact:true}).click();
+  assert.equal(await page.locator('.transcript-list').evaluate(el => Math.abs(el.scrollHeight-el.clientHeight-el.scrollTop)<2), true);
+}, true));
+
+test("窄屏可在列表与对话之间切换并保留草稿，详情可用键盘关闭", async () => fixture(async (page) => {
+  await page.setViewportSize({width:390,height:844});
+  const input = page.getByLabel('消息内容', {exact:true});
+  await input.fill('窄屏甲草稿');
+  await page.getByRole('button',{name:'☰ 会话列表',exact:true}).click();
+  assert.equal(await input.isVisible(), false);
+  await page.getByRole('button',{name:/会话乙/}).click();
+  await input.fill('窄屏乙草稿');
+  await page.getByRole('button',{name:'☰ 会话列表',exact:true}).click();
+  await page.getByRole('button',{name:/会话甲/}).click();
+  assert.equal(await input.inputValue(), '窄屏甲草稿');
+  await page.locator('.conversation-inspector > summary').click();
+  await page.getByRole('region',{name:'会话用量',exact:true}).waitFor();
+  await page.locator('.conversation-inspector > summary').focus();
+  await page.keyboard.press('Escape');
+  assert.equal(await page.getByRole('region',{name:'会话用量',exact:true}).isVisible(), false);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth), true);
+  await page.setViewportSize({width:507,height:394});
+  const inputBox=await input.boundingBox();
+  const sendBox=await page.getByRole('button',{name:'发送消息',exact:true}).boundingBox();
+  assert.ok(inputBox.y>=0 && inputBox.y+inputBox.height<=394);
+  assert.ok(sendBox.y>=0 && sendBox.y+sendBox.height<=394);
+}, true));
+
+test("空工作台可直接创建真实会话或打开服务商配置", async () => fixture(async (page) => {
+  const nav=page.getByRole('navigation',{name:'工作区导航'});
+  await nav.getByRole('button',{name:'会话',exact:true}).click();
+  await page.getByRole('heading',{name:'从一个想法开始',exact:true}).waitFor();
+  await page.getByRole('button',{name:'配置服务商',exact:true}).click();
+  await page.getByRole('heading',{name:'服务商与模型',exact:true}).waitFor();
+  await nav.getByRole('button',{name:'会话',exact:true}).click();
+  await page.getByRole('button',{name:'新建会话',exact:true}).click();
+  await page.getByLabel('消息内容',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>window.fixture.conversations.length),1);
+  assert.equal(await page.getByRole('heading',{name:'新建会话',exact:true}).count(),1);
+}));
+
+
+test("历史服务商已删除时恢复有效目录，目录先后返回均不请求失效配置", async () => fixture(async (page) => {
+  for (const delay of [0, 200]) {
+    await page.getByRole('button',{name:/会话乙/}).click();
+    await page.evaluate(value => {
+      const f=window.fixture; f.providerDelay=value; f.modelArgs=[];
+      f.statuses[1].model={providerId:'custom-deleted',modelId:'removed-model'};
+    }, delay);
+    await page.getByRole('button',{name:/会话甲/}).click();
+    await page.waitForFunction(()=>document.querySelector('[aria-label="对话服务商"]').value==='deepseek' &&
+      document.querySelector('[aria-label="对话模型"]').value==='deepseek-model' && !document.querySelector('textarea').disabled);
+    assert.equal(await page.evaluate(()=>window.fixture.modelArgs.includes('custom-deleted')),false);
+  }
+}, true));
+
+
+test("切换至有效模型目录后清除旧模型错误且保留输入", async () => fixture(async (page) => {
+  await page.getByLabel('消息内容',{exact:true}).fill('恢复模型目录后仍保留');
+  await page.evaluate(()=>{window.fixture.failModelsFor='deepseek';});
+  await page.getByRole('button',{name:'刷新模型目录',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'模型目录读取失败'}).waitFor();
+  await page.getByLabel('对话服务商',{exact:true}).selectOption('other');
+  await page.waitForFunction(()=>document.querySelector('[aria-label="对话模型"]').value==='other-model');
+  assert.equal(await page.getByRole('alert').filter({hasText:'模型目录读取失败'}).count(),0);
+  assert.equal(await page.getByLabel('消息内容',{exact:true}).inputValue(),'恢复模型目录后仍保留');
+},true));

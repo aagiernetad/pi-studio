@@ -44,6 +44,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState("");
   const [catalogError, setCatalogError] = useState("");
+  const [modelError, setModelError] = useState("");
   const [error, setError] = useState(draft?.input ? "上次发送结果尚未确认，可重试同一请求核对，不会重复发送。" : "");
   const [content, setContent] = useState(draft?.content ?? "");
   const [action, setAction] = useState<"send" | "stop" | "resume" | "reset" | null>(null);
@@ -59,6 +60,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const pendingReset = useRef<{ conversationId: number; requestId: string } | null>(null);
   const minimumEntryId = useRef<number | null>(null);
   const savedModel = useRef<Status["model"]>(null);
+  const availableProviders = useRef<Provider[]>([]);
   const onEntries = useRef(onEntriesChanged);
   onEntries.current = onEntriesChanged;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -68,14 +70,18 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
     setCatalogError("");
     void invoke<{ items: Provider[] }>("provider_list").then((catalog) => {
       if (!active) return;
+      availableProviders.current = catalog.items;
       setProviders(catalog.items);
+      const restored = savedModel.current;
       setProviderId((current) => catalog.items.some((item) => item.id === current) ? current :
-        (catalog.items.find((item) => item.id === "deepseek")?.id ?? catalog.items[0]?.id ?? ""));
+        (restored && catalog.items.some((item) => item.id === restored.providerId) ? restored.providerId :
+          (catalog.items.find((item) => item.id === "deepseek")?.id ?? catalog.items[0]?.id ?? "")));
     }).catch(() => { if (active) setCatalogError("服务商目录读取失败，请刷新模型目录。"); });
     return () => { active = false; };
   }, [revision, catalogRevision]);
   useEffect(() => {
-    if (!providerId) return;
+    setModelError("");
+    if (!providerId) { setModels([]); setModelId(""); setModelsLoading(false); return; }
     let active = true;
     setModelsLoading(true);
     setModels([]);
@@ -86,7 +92,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         (savedModel.current?.providerId === providerId ?
           (catalog.items.some((item) => item.id === savedModel.current?.modelId) ? savedModel.current.modelId : "") :
           (catalog.items.find((item) => supported(item.api))?.id ?? "")));
-    }).catch(() => { if (active) setCatalogError("模型目录读取失败，请刷新模型目录。"); })
+    }).catch(() => { if (active) setModelError("模型目录读取失败，请刷新模型目录。"); })
       .finally(() => { if (active) setModelsLoading(false); });
     return () => { active = false; };
   }, [providerId, revision, catalogRevision]);
@@ -105,7 +111,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         setStatusError("");
         if (first) {
           savedModel.current = next.model;
-          if (next.model) { setProviderId(next.model.providerId); setModelId(next.model.modelId); }
+          if (next.model && availableProviders.current.some((item) => item.id === next.model?.providerId)) { setProviderId(next.model.providerId); setModelId(next.model.modelId); }
           first = false;
         }
         if (latest !== undefined && latest !== next.latestEntryId) onEntries.current();
@@ -228,8 +234,8 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         </select>
       </label>
       </div>
-      <textarea aria-label="消息内容" value={content} maxLength={8000} rows={4} disabled={disabled}
-        placeholder="输入消息，最多 8000 字符" onKeyDown={(event) => {
+      <textarea aria-label="消息内容" value={content} maxLength={8000} rows={3} disabled={disabled}
+        placeholder="输入消息，Ctrl / ⌘ + Enter 发送" onKeyDown={(event) => {
           if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey) || event.nativeEvent.isComposing) return;
           event.preventDefault();
           if (!event.repeat && !event.currentTarget.disabled && !modelsLoading && content.trim() && selected && supported(selected.api)) void send();
@@ -237,7 +243,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           setContent(event.target.value);
           onDraftUpdate({ type: "edit", content: event.target.value });
         }} />
-      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。草稿在本次打开期间按会话保留。</p>
+      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。</p>
       <div className="provider-actions">
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
           {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}
@@ -259,11 +265,12 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
       </div>}
       {status?.contextReset && <p className="provider-notice" role="status">已开始新上下文。此前消息仍可在历史中查看。</p>}
       {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
-      <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
+      <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>
-      {status?.running && <div role="status"><p>正在生成回复...</p>{status.partialText && <pre className="transcript-content">{status.partialText}</pre>}</div>}
+</div></details>
+      {status?.running && <div className="chat-live" role="status"><p>正在生成回复...</p>{status.partialText && <pre className="transcript-content">{status.partialText}</pre>}</div>}
       {!status?.running && status?.failureReason && <p role="status" className="muted">{status.failureReason === "aborted" ? "生成已停止，已产生的历史会保留。" : "本轮未完成回复，请检查模型、凭据或网络后再发送。"}</p>}
-      {(error || catalogError || statusError) && <div role="alert" className="error">{error || catalogError || statusError}</div>}
+      {(error || catalogError || modelError || statusError) && <div role="alert" className="error">{error || catalogError || modelError || statusError}</div>}
     </div>
   );
 }

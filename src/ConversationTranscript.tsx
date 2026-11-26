@@ -208,11 +208,10 @@ export default function ConversationTranscript({
         >
           刷新历史
         </button>
+        <button type="button" onClick={() => { if (list.current) list.current.scrollTop = list.current.scrollHeight; }}>回到最新</button>
       </div>
 
-      <p className="muted">
-        按时间顺序阅读对话，可加载更早消息。
-      </p>
+
 
       {forkError && <div className="error" role="alert">{forkError}
         <button type="button" disabled={forking || forkDisabled} onClick={() => { if (pendingFork.current) void fork(pendingFork.current.entryId); }}>重试创建分支</button>
