@@ -70,6 +70,13 @@ async function fixture(run, withChat = false) {
             return result;
           }
           if (command === "conversation_entries") {
+            if (state.realEntryPages) {
+              const all = [...(state.entries[args.conversationId] ?? [])].filter(entry => entry.id < (args.cursor?.before ?? Infinity)).sort((a, b) => b.id - a.id);
+              const items = structuredClone(all.slice(0, args.limit ?? 10));
+              const result = { items, nextCursor: all.length > items.length ? { before: items.at(-1).id } : null };
+              if (args.cursor && state.overlapEntry) result.items.push(structuredClone(state.overlapEntry));
+              return result;
+            }
             if (args.cursor && state.holdOlder) return new Promise(resolve => { state.releaseOlder = () => resolve({ items: [{ id: 99, kind: "probe", data: "不应混入的旧页", model: null }], nextCursor: null }); });
             return { items: [...(state.entries[args.conversationId] ?? [])], nextCursor: state.paginated ? { before: 1 } : null };
           }
@@ -701,4 +708,75 @@ test("返回会话刷新模型目录，页面切换保留生成与未确认消�
   assert.equal(await page.evaluate(() => window.fixture.calls.filter(item => item === 'conversation_chat_abort').length), 0);
   await page.getByRole('button', { name: '停止生成', exact: true }).click();
   await page.getByRole('button', { name: '继续上次生成', exact: true }).waitFor();
+}, true));
+
+
+test("对话按时间正序阅读，更早分页置顶且加载后保留阅读位置并去重", async () => fixture(async (page) => {
+  await page.evaluate(() => {
+    const f = window.fixture;
+    f.realEntryPages = true;
+    f.entries[1] = Array.from({ length: 14 }, (_, index) => ({ id: index + 1,
+      kind: index % 2 ? 'pi.assistant' : 'studio.chat-input', data: null,
+      model: [{ role: index % 2 ? 'assistant' : 'user', content: '分页消息' + (index + 1) + '\n' + '正文内容\n'.repeat(12), stopReason: 'stop' }] }));
+    f.overlapEntry = structuredClone(f.entries[1][4]);
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const list = page.getByRole('region', { name: '对话消息', exact: true });
+  await page.waitForFunction(() => document.querySelectorAll('.transcript-entry').length === 10);
+  assert.deepEqual(await list.locator('article').evaluateAll(items => items.map(item => Number(item.dataset.entryId))), [5,6,7,8,9,10,11,12,13,14]);
+  assert.equal(await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find(item => item.textContent === '加载更早记录');
+    return !!(button.compareDocumentPosition(document.querySelector('.transcript-list')) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+      !!(document.querySelector('.transcript-list').compareDocumentPosition(document.querySelector('.chat-panel')) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), true);
+  await list.evaluate(element => { element.scrollTop = 0; });
+  const before = await list.locator('[data-entry-id="5"]').evaluate(element => element.getBoundingClientRect().top - element.parentElement.getBoundingClientRect().top);
+  await page.getByRole('button', { name: '加载更早记录', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.transcript-entry').length === 14);
+  const after = await list.locator('[data-entry-id="5"]').evaluate(element => element.getBoundingClientRect().top - element.parentElement.getBoundingClientRect().top);
+  assert.ok(Math.abs(after - before) < 2, '加载更早消息后应保持原阅读位置');
+  assert.deepEqual(await list.locator('article').evaluateAll(items => items.map(item => Number(item.dataset.entryId))), Array.from({ length: 14 }, (_, i) => i + 1));
+  const nav = page.getByRole('navigation', { name: '工作区导航' });
+  await nav.getByRole('button', { name: '诊断', exact: true }).click();
+  const reads = await page.evaluate(() => window.fixture.calls.filter(item => item === 'conversation_entries').length);
+  await page.evaluate(() => {
+    const f = window.fixture;
+    f.entries[1].push({ id: 15, kind: 'pi.assistant', data: null,
+      model: [{ role: 'assistant', content: '隐藏期间的新回复\n' + '正文\n'.repeat(12), stopReason: 'stop' }] });
+    f.statuses[1].latestEntryId = 15;
+  });
+  await page.waitForFunction(count => window.fixture.calls.filter(item => item === 'conversation_entries').length > count, reads);
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  await page.waitForFunction(() => {
+    const el = document.querySelector('.transcript-list');
+    return el && el.lastElementChild?.dataset.entryId === "15" && el.clientHeight > 0 && Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 2;
+  });
+  assert.equal(await list.locator('article').last().getAttribute('data-entry-id'), '15');
+}, true));
+
+test("输入区 Enter 换行，组合输入不发送，Ctrl 或 Command Enter 每次只提交一条", async () => fixture(async (page) => {
+  const input = page.getByLabel('消息内容', { exact: true });
+  await input.fill('第一行');
+  await input.press('Enter');
+  await input.press('End');
+  await input.type('第二行');
+  assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 0);
+  assert.ok((await input.inputValue()).includes('\n'));
+  await input.evaluate(element => {
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, isComposing: true, bubbles: true }));
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, repeat: true, bubbles: true }));
+  });
+  assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 0);
+  await input.press('Control+Enter');
+  await page.waitForFunction(() => window.fixture.submitArgs.length === 1);
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+  await input.fill('Command 快捷发送');
+  await input.press('Meta+Enter');
+  await page.waitForFunction(() => window.fixture.submitArgs.length === 2);
+  const args = await page.evaluate(() => window.fixture.submitArgs);
+  assert.notEqual(args[0].requestId, args[1].requestId);
+  assert.equal(args[1].content, 'Command 快捷发送');
+  await page.getByRole('navigation', { name: '工作区导航' }).getByRole('button', { name: '服务商', exact: true }).click();
+  await page.getByRole('navigation', { name: '工作区导航' }).getByRole('button', { name: '会话', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 2);
 }, true));

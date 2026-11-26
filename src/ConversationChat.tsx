@@ -203,9 +203,10 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const disabled = !status || status.running || action !== null || hasPending || hasPendingResume || confirmReset || hasPendingReset;
   return (
     <div className="chat-panel" aria-label="模型对话">
-      <div className="transcript-heading"><strong>发送消息</strong>
+      <div className="transcript-heading"><strong>消息输入</strong>
         <button type="button" disabled={disabled} onClick={() => setRevision((value) => value + 1)}>刷新模型目录</button>
       </div>
+      <div className="chat-model-selectors">
       <label className="provider-field"><span>对话服务商</span>
         <select aria-label="对话服务商" value={providerId} disabled={disabled || providers.length === 0} onChange={(event) => setProviderId(event.target.value)}>
           {providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -217,8 +218,14 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           {models.map((item) => <option key={item.id} value={item.id} disabled={!supported(item.api)}>{item.name}{supported(item.api) ? "" : "（暂不支持）"}</option>)}
         </select>
       </label>
+      </div>
       <textarea aria-label="消息内容" value={content} maxLength={8000} rows={4} disabled={disabled}
-        placeholder="输入消息，最多 8000 字符" onChange={(event) => setContent(event.target.value)} />
+        placeholder="输入消息，最多 8000 字符" onKeyDown={(event) => {
+          if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey) || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          if (!event.repeat && !event.currentTarget.disabled && !modelsLoading && content.trim() && selected && supported(selected.api)) void send();
+        }} onChange={(event) => setContent(event.target.value)} />
+      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。</p>
       <div className="provider-actions">
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
           {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}

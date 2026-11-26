@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ChatMessage from "./ChatMessage";
 
@@ -69,6 +69,29 @@ export default function ConversationTranscript({
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const generation = useRef(0);
+  const list = useRef<HTMLDivElement>(null);
+  const olderAnchor = useRef<{ height: number; top: number } | null>(null);
+  const showLatest = useRef(true);
+
+  useLayoutEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    function align() {
+      if (!element || element.clientHeight === 0) return;
+      if (olderAnchor.current) {
+        element.scrollTop = olderAnchor.current.top + element.scrollHeight - olderAnchor.current.height;
+        olderAnchor.current = null;
+      } else if (showLatest.current) {
+        element.scrollTop = element.scrollHeight;
+        showLatest.current = false;
+      }
+    }
+    align();
+    // 会话页隐藏时不计算滚动位置，重新可见后再定位。
+    const observer = new ResizeObserver(align);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [entries, loading]);
   const mounted = useRef(true);
   const pendingFork = useRef<{ requestId: string; entryId: number } | null>(null);
   const [forking, setForking] = useState(false);
@@ -98,6 +121,8 @@ export default function ConversationTranscript({
   useEffect(() => {
     let cancelled = false;
     generation.current += 1;
+    olderAnchor.current = null;
+    showLatest.current = true;
 
     setLoading(true);
     setLoadingMore(false);
@@ -154,10 +179,11 @@ export default function ConversationTranscript({
       );
 
       if (currentGeneration !== generation.current) return;
-      setEntries((previous) => [
-        ...previous,
-        ...page.items,
-      ]);
+      if (list.current) olderAnchor.current = { height: list.current.scrollHeight, top: list.current.scrollTop };
+      setEntries((previous) => {
+        const known = new Set(previous.map((entry) => entry.id));
+        return [...previous, ...page.items.filter((entry) => !known.has(entry.id))];
+      });
 
       setNextCursor(page.nextCursor);
     } catch (cause) {
@@ -171,7 +197,7 @@ export default function ConversationTranscript({
   return (
     <div className="transcript-panel">
       <div className="transcript-heading">
-        <strong>Transcript 历史</strong>
+        <strong>对话消息</strong>
 
         <button
           type="button"
@@ -185,7 +211,7 @@ export default function ConversationTranscript({
       </div>
 
       <p className="muted">
-        显示 Durable 中的真实 Entry，最新记录在前。
+        按时间顺序阅读对话，可加载更早消息。
       </p>
 
       {forkError && <div className="error" role="alert">{forkError}
@@ -198,25 +224,37 @@ export default function ConversationTranscript({
         </div>
       )}
 
+      {nextCursor !== null && !loading && (
+        <button
+          type="button"
+          className="conversation-more"
+          disabled={loadingMore}
+          onClick={() => void loadMore()}
+        >
+          {loadingMore
+            ? "加载中..."
+            : "加载更早记录"}
+        </button>
+      )}
+
       {loading ? (
         <p className="muted">正在读取历史记录...</p>
       ) : entries.length === 0 ? (
         <div className="conversation-placeholder">
-          当前会话暂无历史记录。
-          <p>
-            会话已经持久化，但尚未写入 Transcript。
-          </p>
+          开始新的对话
+          <p>选择模型，在下方输入第一条消息。</p>
         </div>
       ) : (
-        <div className="transcript-list">
-          {entries.map((entry) => (
+        <div className="transcript-list" ref={list} role="region" aria-label="对话消息" tabIndex={0}>
+          {[...entries].sort((a, b) => a.id - b.id).map((entry) => (
             <article
-              className="transcript-entry"
+              className={`transcript-entry ${entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "message-user" : entry.kind === "pi.assistant" ? "message-assistant" : "message-boundary"}`}
               key={entry.id}
+              data-entry-id={entry.id}
             >
               <div className="transcript-entry-header">
                 <strong>{entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "你" : entry.kind === "pi.assistant" ? "助手" : entry.kind === "pi.reset" ? "新上下文" : entry.kind}</strong>
-                <span>Entry #{entry.id}</span>
+
               </div>
 
               {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
@@ -236,6 +274,7 @@ export default function ConversationTranscript({
                 entry.model !== undefined && (
                   <details className="transcript-model">
                     <summary>查看模型内容</summary>
+                    <span>Entry #{entry.id}</span>
                     <pre>
                       {formatContent(entry.model)}
                     </pre>
@@ -246,18 +285,7 @@ export default function ConversationTranscript({
         </div>
       )}
 
-      {nextCursor !== null && !loading && (
-        <button
-          type="button"
-          className="conversation-more"
-          disabled={loadingMore}
-          onClick={() => void loadMore()}
-        >
-          {loadingMore
-            ? "加载中..."
-            : "加载更早记录"}
-        </button>
-      )}
+
     </div>
   );
 }

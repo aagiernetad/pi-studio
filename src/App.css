@@ -1,5 +1,6 @@
 
 :root {
+  color-scheme: dark;
   font-family: "Segoe UI", Arial, sans-serif;
   color: #e8edf4;
   background: #101419;
@@ -548,3 +549,24 @@ footer {
 .workspace-heading h2 { font-size: 22px; margin-bottom: 6px; }
 .workspace-heading p { margin: 0; }
 @media (max-width: 600px) { .studio-navigation button { flex: 1; min-width: 0; padding-inline: 10px; } }
+
+/* 会话阅读区与输入区 */
+.conversation-layout { align-items: start; }
+.conversation-list { max-height: 60vh; overflow-y: auto; }
+.conversation-metadata { margin: 0 0 14px; color: #96a2b2; font-size: 12px; }
+.conversation-metadata summary { cursor: pointer; }
+.transcript-panel { margin-top: 16px; }
+.transcript-list { max-height: 56vh; overflow-y: auto; overflow-anchor: none; padding: 4px; overscroll-behavior: contain; }
+.transcript-list:focus-visible { outline: 2px solid #6c9dff; outline-offset: 2px; }
+.transcript-entry.message-user { margin-left: 24px; background: #1b2b3d; border-color: #3c5671; }
+.transcript-entry.message-assistant { margin-right: 12px; }
+.transcript-entry.message-boundary { border-style: dashed; }
+.chat-model-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.chat-shortcut { margin: 0 0 12px; }
+.chat-panel { border-color: #303946; margin-bottom: 0; }
+.chat-panel textarea { border-color: #414c5c; }
+@media (max-width: 650px) {
+  .chat-model-selectors { grid-template-columns: 1fr; }
+  .transcript-entry.message-user { margin-left: 12px; }
+  .conversation-list { max-height: 28vh; }
+}

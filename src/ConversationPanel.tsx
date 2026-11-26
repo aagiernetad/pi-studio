@@ -297,6 +297,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                 setNotice(matches ? "会话标题已更新。" : "标题已更新；该会话不再匹配当前搜索，可清除搜索查看。");
               }} />
 
+              <details className="conversation-metadata"><summary>会话信息</summary>
               <p className="muted">
                 Conversation ID：{selected.id}
               </p>
@@ -308,10 +309,9 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                 ).toLocaleString("zh-CN")}
               </p>
 
+              </details>
+
               {selected.forkedFrom && <p className="muted">分支来自会话 #{selected.forkedFrom.conversationId} 的回复 #{selected.forkedFrom.entryId}；用量仅统计此分支的新请求。</p>}
-              <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id} catalogRevision={catalogRevision}
-                onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
-              <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
               <ConversationTranscript
                   key={selected.id}
                   conversationId={selected.id}
@@ -327,6 +327,9 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                     setNotice("分支会话已创建，可以从这条回复继续新的方向。原会话已保留。");
                   }}
                />
+              <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id} catalogRevision={catalogRevision}
+                onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
+              <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
             </>
           ) : (
             <div className="conversation-placeholder">
