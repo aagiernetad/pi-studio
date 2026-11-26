@@ -17,9 +17,9 @@ async function fixture(run, withChat = false) {
   try {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
-        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [],
+        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [], resetArgs: [],
         usages: {}, conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
-      const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false };
+      const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false, contextReset: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
       window.__TAURI_INTERNALS__ = {
         transformCallback: () => 1,
@@ -70,6 +70,7 @@ async function fixture(run, withChat = false) {
             current.model = { providerId: input.providerId, modelId: input.modelId };
             current.running = !!state.slowChat;
             current.canResume = false;
+            current.contextReset = false;
             current.partialText = state.slowChat ? "正在回复" : "";
             current.latestEntryId = id * 2;
             state.entries[input.conversationId] = [
@@ -93,6 +94,20 @@ async function fixture(run, withChat = false) {
             return { submissionId: id };
           }
           if (command === "conversation_chat_abort") { Object.assign(chatStatus(args.conversationId), { running: false, partialText: "", failureReason: "aborted", canResume: true }); return { stopped: true }; }
+          if (command === "conversation_context_reset") {
+            const input = args.input;
+            state.resetArgs.push(structuredClone(input));
+            if (state.submissions[input.requestId]) return { submissionId: state.submissions[input.requestId], entryId: 200 + state.submissions[input.requestId] };
+            if (state.holdReset) await new Promise(resolve => { state.releaseReset = resolve; });
+            const current = chatStatus(input.conversationId);
+            if (current.running) throw 'CONVERSATION_BUSY: busy';
+            const id = Object.keys(state.submissions).length + 1;
+            state.submissions[input.requestId] = id;
+            Object.assign(current, { contextReset: true, canResume: false, failureReason: null, latestEntryId: 200 + id });
+            state.entries[input.conversationId].unshift({ id: 200 + id, kind: 'pi.reset', data: null, model: null });
+            if (state.failResetOnce) { state.failResetOnce = false; throw 'IPC_TIMEOUT: synthetic-reset-private'; }
+            return { submissionId: id, entryId: 200 + id };
+          }
           if (command === "provider_list") return { items: [
             { id: "deepseek", name: "DeepSeek", supportsApiKey: true },
             { id: "other", name: "Other", supportsApiKey: true },
@@ -459,4 +474,61 @@ test("新回复刷新用量后旧分页无效，切换会话后迟到用量不�
   await usage.getByText('暂无已记录的模型用量。', { exact: true }).waitFor();
   await page.evaluate(() => { window.fixture.releaseUsage(); });
   assert.equal(await usage.getByRole('row').filter({ hasText: 'new-current-usage' }).count(), 0);
+}, true));
+
+test("新上下文需要确认，未知结果重试同一请求且保留历史、模型和草稿", async () => fixture(async (page) => {
+  const chat = page.locator('.chat-panel');
+  await chat.getByLabel('消息内容').fill('重置前的原消息');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.locator('.transcript-list').getByText('本地页面回复', { exact: true }).waitFor();
+  await chat.getByRole('button', { name: '开始新上下文', exact: true }).click();
+  await chat.getByRole('button', { name: '取消重置', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.fixture.resetArgs.length), 0);
+  await chat.getByLabel('消息内容').fill('保留的下一条草稿');
+  const provider = await chat.getByLabel('对话服务商').inputValue();
+  const model = await chat.getByLabel('对话模型').inputValue();
+  await page.evaluate(() => { window.fixture.failResetOnce = true; window.fixture.holdStatus = 1; });
+  await page.waitForFunction(() => typeof window.fixture.releaseStatus === 'function');
+  await chat.getByRole('button', { name: '开始新上下文', exact: true }).click();
+  await chat.getByRole('button', { name: '确认开始新上下文', exact: true }).click();
+  await chat.getByRole('button', { name: '重试同一重置请求', exact: true }).waitFor();
+  assert.equal(await chat.getByLabel('消息内容').isDisabled(), true);
+  assert.equal(await chat.getByRole('button', { name: '取消重置', exact: true }).isDisabled(), true);
+  assert.equal((await chat.innerText()).includes('synthetic-reset-private'), false);
+  await chat.getByRole('button', { name: '重试同一重置请求', exact: true }).click();
+  await chat.getByText('已开始新上下文。此前消息仍可在历史中查看。', { exact: true }).waitFor();
+  await page.evaluate(() => { window.fixture.holdStatus = null; window.fixture.releaseStatus(); });
+  await page.locator('.transcript-list').getByText('此前消息保留在历史中，后续模型请求从这里开始。', { exact: true }).waitFor();
+  assert.equal(await page.locator('.transcript-list').getByText('重置前的原消息', { exact: true }).count(), 1);
+  assert.equal(await chat.getByLabel('消息内容').inputValue(), '保留的下一条草稿');
+  assert.equal(await chat.getByText('已开始新上下文。此前消息仍可在历史中查看。', { exact: true }).count(), 1);
+  assert.equal(await chat.getByLabel('对话服务商').inputValue(), provider);
+  assert.equal(await chat.getByLabel('对话模型').inputValue(), model);
+  const args = await page.evaluate(() => window.fixture.resetArgs);
+  assert.equal(args.length, 2);
+  assert.equal(args[0].requestId, args[1].requestId);
+  assert.equal(await page.evaluate(() => window.fixture.entries[1].filter(item => item.kind === 'pi.reset').length), 1);
+  assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 1);
+}, true));
+
+test("生成时禁止重置，切换会话后迟到重置不能影响新草稿，返回后显示原生边界", async () => fixture(async (page) => {
+  const chat = page.locator('.chat-panel');
+  await page.evaluate(() => { window.fixture.slowChat = true; window.fixture.holdReset = true; });
+  await chat.getByLabel('消息内容').fill('生成后停止再重置');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await chat.getByText('正在生成回复...', { exact: true }).waitFor();
+  assert.equal(await chat.getByRole('button', { name: '开始新上下文', exact: true }).isDisabled(), true);
+  await chat.getByRole('button', { name: '停止生成', exact: true }).click();
+  await chat.getByRole('button', { name: '继续上次生成', exact: true }).waitFor();
+  await chat.getByRole('button', { name: '开始新上下文', exact: true }).click();
+  await chat.getByRole('button', { name: '确认开始新上下文', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseReset === 'function');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await chat.getByLabel('消息内容').fill('乙的草稿');
+  await page.evaluate(() => { window.fixture.releaseReset(); });
+  assert.equal(await chat.getByLabel('消息内容').inputValue(), '乙的草稿');
+  assert.equal(await chat.getByText('已开始新上下文。此前消息仍可在历史中查看。', { exact: true }).count(), 0);
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  await chat.getByText('已开始新上下文。此前消息仍可在历史中查看。', { exact: true }).waitFor();
+  assert.equal(await chat.getByRole('button', { name: '继续上次生成', exact: true }).count(), 0);
 }, true));

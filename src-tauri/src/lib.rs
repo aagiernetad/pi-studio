@@ -307,6 +307,14 @@ async fn conversation_chat_resume(
 }
 
 #[tauri::command]
+async fn conversation_context_reset(
+    state: State<'_, RuntimeState>,
+    input: Value,
+) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "conversation.context.reset", input).await
+}
+
+#[tauri::command]
 async fn conversation_chat_status(
     state: State<'_, RuntimeState>,
     conversation_id: i64,
@@ -425,6 +433,7 @@ pub fn run() {
             provider_config_delete,
             conversation_chat_submit,
             conversation_chat_resume,
+            conversation_context_reset,
             conversation_chat_status,
             conversation_chat_abort,
         ])

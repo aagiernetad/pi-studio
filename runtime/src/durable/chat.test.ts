@@ -162,8 +162,8 @@ test("upstream authentication errors are sanitized before Durable stores entries
 test("chat validates parameters, credentials and user visibility without creating a model request", { timeout: 20_000 }, async (context) => {
   const f = await fixture(context);
   const root = await f.host.root();
-  for (const method of ["conversation.chat.submit", "conversation.chat.status", "conversation.chat.abort", "conversation.chat.resume", "conversation.usage"]) {
-    const input = method.endsWith("submit") ? { ...f.input(), conversationId: root.id } : method.endsWith("resume") ? { conversationId: root.id, requestId: randomUUID() } : { conversationId: root.id };
+  for (const method of ["conversation.chat.submit", "conversation.chat.status", "conversation.chat.abort", "conversation.chat.resume", "conversation.usage", "conversation.context.reset"]) {
+    const input = method.endsWith("submit") ? { ...f.input(), conversationId: root.id } : method.endsWith("resume") || method.endsWith("reset") ? { conversationId: root.id, requestId: randomUUID() } : { conversationId: root.id };
     const hidden = await f.request(method, input);
     assert.ok(!hidden.success);
     assert.equal(hidden.error.code, "CONVERSATION_NOT_FOUND");
@@ -382,4 +382,93 @@ test("reopen resumes a paused native run without admitting the user input twice"
   assert.ok(conversation);
   const entries = await conversation.entries({}, 20, undefined, BACKGROUND_CONTEXT);
   assert.equal(entries.items.filter((entry) => entry.kind === "studio.chat-input").length, 1);
+});
+
+test("native context reset is idempotent across reopen and keeps transcript, model and usage while excluding old messages", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.enableUsage();
+  const oldInput = f.input("旧上下文唯一标记");
+  const first = await f.request("conversation.chat.submit", oldInput);
+  assert.ok(first.success);
+  await f.settled(first.result.submissionId);
+  const conversation = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(conversation);
+  const before = await conversation.entries({ order: "ascending" }, 20, undefined, BACKGROUND_CONTEXT);
+  const usageBefore = await f.request("conversation.usage", { conversationId: f.conversation.id });
+  assert.ok(usageBefore.success);
+  await f.credentials.delete(f.config.id);
+  const input = { conversationId: f.conversation.id, requestId: randomUUID() };
+  const [reset, duplicate] = await Promise.all([1, 2].map(() => f.request("conversation.context.reset", input)));
+  assert.ok(reset.success && duplicate.success);
+  assert.equal(reset.result.submissionId, duplicate.result.submissionId);
+  assert.equal((await f.settled(reset.result.submissionId)).status, "done");
+  const after = await conversation.entries({ order: "ascending" }, 20, undefined, BACKGROUND_CONTEXT);
+  assert.deepEqual(after.items.slice(0, before.items.length), before.items);
+  const resets = after.items.filter((entry) => entry.kind === "pi.reset");
+  assert.equal(resets.length, 1);
+  assert.equal(resets[0]?.head, resets[0]?.id);
+  assert.equal(reset.result.entryId, resets[0]?.id);
+  assert.deepEqual(duplicate.result, reset.result);
+  assert.equal((await conversation.context(BACKGROUND_CONTEXT)).messages.length, 0);
+  await f.reopen();
+  const retried = await f.request("conversation.context.reset", input);
+  assert.ok(retried.success);
+  assert.equal(retried.result.submissionId, reset.result.submissionId);
+  const usageAfter = await f.request("conversation.usage", { conversationId: f.conversation.id });
+  assert.ok(usageAfter.success);
+  assert.deepEqual(usageAfter.result, usageBefore.result);
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success);
+  assert.equal(status.result.contextReset, true);
+  assert.equal(status.result.canResume, false);
+  assert.deepEqual(status.result.model, { providerId: f.config.id, modelId: f.config.modelId });
+  assert.equal(f.calls.length, 1, "reset and retries do not call the model or require credentials");
+  const originalRetry = await f.request("conversation.chat.submit", oldInput);
+  assert.ok(originalRetry.success);
+  assert.equal(originalRetry.result.submissionId, first.result.submissionId);
+  await f.credentials.modify(f.config.id, async () => ({ type: "api_key", key: "synthetic-chat-secret" }));
+  const newInput = await f.request("conversation.chat.submit", f.input("新上下文的问题"));
+  assert.ok(newInput.success);
+  await f.settled(newInput.result.submissionId);
+  assert.equal(f.calls.length, 2);
+  assert.equal(JSON.stringify(f.calls[1]?.messages).includes("旧上下文唯一标记"), false);
+  assert.equal(JSON.stringify(f.calls[1]?.messages).includes("本地回复完成"), false);
+  assert.ok(JSON.stringify(f.calls[1]?.messages).includes("新上下文的问题"));
+});
+
+test("context reset rejects busy and invalid requests and prevents resuming the old failed context", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.setMode("slow");
+  const input = f.input("准备停止与重置");
+  const running = await f.request("conversation.chat.submit", input);
+  assert.ok(running.success);
+  const resetInput = { conversationId: f.conversation.id, requestId: randomUUID() };
+  const busy = await f.request("conversation.context.reset", resetInput);
+  assert.ok(!busy.success);
+  assert.equal(busy.error.code, "CONVERSATION_BUSY");
+  assert.ok((await f.request("conversation.chat.abort", { conversationId: f.conversation.id })).success);
+  await f.settled(running.result.submissionId);
+  const reset = await f.request("conversation.context.reset", resetInput);
+  assert.ok(reset.success);
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success);
+  assert.equal(status.result.failureReason, null);
+  assert.equal(status.result.canResume, false);
+  const resume = await f.request("conversation.chat.resume", { conversationId: f.conversation.id, requestId: randomUUID() });
+  assert.ok(!resume.success);
+  assert.equal(resume.error.code, "CHAT_NOT_RESUMABLE");
+  for (const [method, params] of [
+    ["conversation.context.reset", { conversationId: f.conversation.id, requestId: input.requestId }],
+    ["conversation.chat.submit", { ...input, requestId: resetInput.requestId }],
+    ["conversation.chat.resume", resetInput],
+  ] satisfies [string, Record<string, unknown>][]) {
+    const conflict = await f.request(method, params);
+    assert.ok(!conflict.success);
+    assert.equal(conflict.error.code, "REQUEST_ID_CONFLICT");
+  }
+  for (const params of [{}, { conversationId: f.conversation.id }, { ...resetInput, requestId: "invalid" }, { ...resetInput, extra: true }]) {
+    const invalid = await f.request("conversation.context.reset", params);
+    assert.ok(!invalid.success);
+    assert.equal(invalid.error.code, "INVALID_PARAMS");
+  }
 });

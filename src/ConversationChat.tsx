@@ -7,6 +7,7 @@ type Status = {
   running: boolean; latestEntryId: number | null; partialText: string;
   model: { providerId: string; modelId: string } | null; failureReason: string | null;
   canResume: boolean;
+  contextReset: boolean;
 };
 type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string };
 const supported = (api: string) => ["openai-completions", "openai-responses", "anthropic-messages"].includes(api);
@@ -39,14 +40,18 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
   const [catalogError, setCatalogError] = useState("");
   const [error, setError] = useState("");
   const [content, setContent] = useState("");
-  const [action, setAction] = useState<"send" | "stop" | "resume" | null>(null);
+  const [action, setAction] = useState<"send" | "stop" | "resume" | "reset" | null>(null);
   const [hasPending, setHasPending] = useState(false);
   const [hasPendingResume, setHasPendingResume] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [hasPendingReset, setHasPendingReset] = useState(false);
   const [revision, setRevision] = useState(0);
   const mounted = useRef(false);
   const working = useRef(false);
   const pending = useRef<Input | null>(null);
   const pendingResume = useRef<{ conversationId: number; requestId: string } | null>(null);
+  const pendingReset = useRef<{ conversationId: number; requestId: string } | null>(null);
+  const minimumEntryId = useRef<number | null>(null);
   const savedModel = useRef<Status["model"]>(null);
   const onEntries = useRef(onEntriesChanged);
   onEntries.current = onEntriesChanged;
@@ -89,6 +94,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
       try {
         const next = await invoke<Status>("conversation_chat_status", { conversationId });
         if (!active) return;
+        if (minimumEntryId.current !== null && (next.latestEntryId === null || next.latestEntryId < minimumEntryId.current)) return;
         setStatus(next);
         setStatusError("");
         if (first) {
@@ -109,7 +115,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
   }, [conversationId]);
 
   async function send() {
-    if (working.current || !status || status.running || modelsLoading) return;
+    if (working.current || !status || status.running || modelsLoading || confirmReset || hasPendingReset) return;
     if (!pending.current) pending.current = { conversationId, requestId: crypto.randomUUID(), providerId, modelId, content: content.trim() };
     const input = pending.current;
     if (!input.content) return;
@@ -138,7 +144,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
     }
   }
   async function resume() {
-    if (working.current || !status || status.running || hasPending) return;
+    if (working.current || !status || status.running || hasPending || confirmReset || hasPendingReset) return;
     if (!pendingResume.current) pendingResume.current = { conversationId, requestId: crypto.randomUUID() };
     working.current = true;
     setAction("resume");
@@ -170,8 +176,31 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
     } catch { if (mounted.current) setError("停止结果尚未确认，请等待状态刷新。"); }
     finally { working.current = false; if (mounted.current) setAction(null); }
   }
+  async function resetContext() {
+    if (working.current || !status || status.running || hasPending || hasPendingResume) return;
+    if (!pendingReset.current) pendingReset.current = { conversationId, requestId: crypto.randomUUID() };
+    working.current = true;
+    setAction("reset"); setError("");
+    try {
+      const result = await invoke<{ entryId: number }>("conversation_context_reset", { input: pendingReset.current });
+      if (mounted.current) {
+        minimumEntryId.current = result.entryId;
+        pendingReset.current = null;
+        setHasPendingReset(false); setConfirmReset(false);
+        setStatus((previous) => previous ? { ...previous, contextReset: true, failureReason: null, canResume: false } : previous);
+        onEntries.current();
+      }
+    } catch (cause: unknown) {
+      if (mounted.current) {
+        const definitive = rejected(cause);
+        if (definitive) pendingReset.current = null;
+        setHasPendingReset(!definitive);
+        setError(definitive ? message(cause) : "上下文重置结果尚未确认，请重试同一重置请求。");
+      }
+    } finally { working.current = false; if (mounted.current) setAction(null); }
+  }
   const selected = models.find((item) => item.id === modelId);
-  const disabled = !status || status.running || action !== null || hasPending || hasPendingResume;
+  const disabled = !status || status.running || action !== null || hasPending || hasPendingResume || confirmReset || hasPendingReset;
   return (
     <div className="chat-panel" aria-label="模型对话">
       <div className="transcript-heading"><strong>发送消息</strong>
@@ -191,14 +220,25 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
       <textarea aria-label="消息内容" value={content} maxLength={8000} rows={4} disabled={disabled}
         placeholder="输入消息，最多 8000 字符" onChange={(event) => setContent(event.target.value)} />
       <div className="provider-actions">
-        <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
+        <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
           {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}
         </button>
         <button type="button" disabled={!status?.running || action !== null} onClick={() => void stop()}>{action === "stop" ? "正在停止..." : "停止生成"}</button>
-        {(status?.canResume || hasPendingResume) && <button type="button" disabled={!status || status.running || action !== null || hasPending} onClick={() => void resume()}>
+        {(status?.canResume || hasPendingResume) && <button type="button" disabled={!status || status.running || action !== null || hasPending || confirmReset || hasPendingReset} onClick={() => void resume()}>
           {action === "resume" ? "正在继续..." : hasPendingResume ? "重试同一继续请求" : "继续上次生成"}
         </button>}
+        <button type="button" disabled={disabled} onClick={() => { setError(""); setConfirmReset(true); }}>开始新上下文</button>
       </div>
+      {confirmReset && <div className="result" role="group" aria-label="确认开始新上下文">
+        <p>后续模型请求将不再携带此前对话。旧消息、会话、模型选择和累计用量会保留，未发送的草稿也会保留。重置本身不调用模型。</p>
+        <div className="provider-actions">
+          <button type="button" disabled={!status || status.running || action !== null || hasPending || hasPendingResume} onClick={() => void resetContext()}>
+            {action === "reset" ? "正在重置..." : hasPendingReset ? "重试同一重置请求" : "确认开始新上下文"}
+          </button>
+          <button type="button" disabled={action !== null || hasPendingReset} onClick={() => setConfirmReset(false)}>取消重置</button>
+        </div>
+      </div>}
+      {status?.contextReset && <p className="provider-notice" role="status">已开始新上下文。此前消息仍可在历史中查看。</p>}
       {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
       <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>

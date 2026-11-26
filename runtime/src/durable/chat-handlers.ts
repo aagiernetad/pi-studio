@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { AgentDoc, ConversationBusy, LiveDoc, configure, type ConversationId, type SubmissionRecord, type Tx } from "@earendil-works/pi-durable";
+import { AgentDoc, ConversationBusy, InboxDoc, LiveDoc, ResetEntry, configure, type ConversationId, type SubmissionRecord, type Tx } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import { RuntimeApplicationError } from "../protocol/errors.js";
 import { RuntimeHandlerRegistry } from "../handlers/registry.js";
@@ -13,6 +13,7 @@ const SubmitParams = ConversationParams.extend({
   modelId: z.string().trim().min(1).max(256), content: z.string().trim().min(1).max(8000),
 });
 const ResumeParams = ConversationParams.extend({ requestId: z.uuid() });
+const ResetParams = ConversationParams.extend({ requestId: z.uuid() });
 const resumableReasons = new Set(["aborted", "model_error", "interrupted", "restart_limit", "no_model"]);
 
 export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: DurableHost): void {
@@ -91,6 +92,10 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
       }
       const live = await tx.doc(LiveDoc, conversation.id);
       if (live.run) throw new RuntimeApplicationError("CONVERSATION_BUSY", "Conversation is already running.");
+      const latest = await tx.latestEntryId(conversation.id);
+      if (latest && (await tx.entry(latest))?.kind === ResetEntry.kind) {
+        throw new RuntimeApplicationError("CHAT_NOT_RESUMABLE", "Conversation context was reset.");
+      }
       if (!live.runFailure || !resumableReasons.has(live.runFailure.reason)) {
         throw new RuntimeApplicationError("CHAT_NOT_RESUMABLE", "Conversation has no failed or stopped answer to resume.");
       }
@@ -122,18 +127,51 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
     }
   });
 
+  registry.register("conversation.context.reset", async (request, context) => {
+    const input = params(ResetParams, request.params);
+    const conversation = await visible(input.conversationId);
+    const submissionId = await host.harness.commit(async (tx) => {
+      context.signal.throwIfAborted();
+      const prior = await tx.submissionByRequest(conversation.id, input.requestId);
+      if (prior) {
+        const entry = prior.entry ? await tx.entry(prior.entry) : undefined;
+        if (prior.type !== "write" || !entry || entry.kind !== ResetEntry.kind || entry.head !== entry.id || entry.model?.length) {
+          throw new RuntimeApplicationError("REQUEST_ID_CONFLICT", "Request id belongs to another operation.");
+        }
+        return prior.id;
+      }
+      const live = await tx.doc(LiveDoc, conversation.id);
+      const inbox = await tx.doc(InboxDoc, conversation.id);
+      if (live.run || live.compactions?.length || inbox.items.length) {
+        throw new RuntimeApplicationError("CONVERSATION_BUSY", "Conversation is busy; wait or stop before resetting context.");
+      }
+      // 与原生 Conversation.reset 相同的被动写入；附加原生 requestId 以支持 IPC 重试。
+      context.signal.throwIfAborted();
+      return conversation.submit(tx, { type: "write", requestId: input.requestId, entry: { kind: ResetEntry.kind, head: "self" } });
+    }, BACKGROUND_CONTEXT);
+    const submitted = await host.harness.submission(submissionId, BACKGROUND_CONTEXT);
+    const record = await submitted?.status(BACKGROUND_CONTEXT);
+    if (!record || record.type !== "write" || record.status !== "done") {
+      throw new RuntimeApplicationError("RESET_NOT_CONFIRMED", "Context reset result is not confirmed.", { retryable: true });
+    }
+    context.emit("conversation.context.reset", { conversationId: conversation.id, submissionId });
+    return { submissionId, entryId: record.entry };
+  });
+
   registry.register("conversation.chat.status", async (request) => {
     const { conversationId } = params(ConversationParams, request.params);
     const conversation = await visible(conversationId);
     return host.harness.commit(async (tx) => {
       const latest = await tx.latestEntryId(conversation.id);
+      const contextReset = Boolean(latest && (await tx.entry(latest))?.kind === ResetEntry.kind);
       const agent = await tx.doc(AgentDoc, conversation.id);
       const live = await tx.doc(LiveDoc, conversation.id);
       return {
         conversationId, running: Boolean(live.run), latestEntryId: latest ?? null,
         model: agent.model ? { providerId: agent.model.provider, modelId: agent.model.modelId } : null,
-        failureReason: live.runFailure?.reason ?? null,
-        canResume: !live.run && Boolean(live.runFailure && resumableReasons.has(live.runFailure.reason)),
+        failureReason: contextReset ? null : live.runFailure?.reason ?? null,
+        canResume: !contextReset && !live.run && Boolean(live.runFailure && resumableReasons.has(live.runFailure.reason)),
+        contextReset,
         partialText: live.generation?.message?.content.filter((item) => item.type === "text").map((item) => item.text).join("").slice(0, 12000) ?? "",
       };
     }, BACKGROUND_CONTEXT);

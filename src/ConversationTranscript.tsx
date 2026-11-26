@@ -183,11 +183,11 @@ export default function ConversationTranscript({
               key={entry.id}
             >
               <div className="transcript-entry-header">
-                <strong>{entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "你" : entry.kind === "pi.assistant" ? "助手" : entry.kind}</strong>
+                <strong>{entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "你" : entry.kind === "pi.assistant" ? "助手" : entry.kind === "pi.reset" ? "新上下文" : entry.kind}</strong>
                 <span>Entry #{entry.id}</span>
               </div>
 
-              {modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
+              {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
                 <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
                 <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
 
