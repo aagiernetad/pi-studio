@@ -133,12 +133,15 @@ async function fixture(run, withChat = false) {
             if (state.failResetOnce) { state.failResetOnce = false; throw 'IPC_TIMEOUT: synthetic-reset-private'; }
             return { submissionId: id, entryId: 200 + id };
           }
+          if (command === "provider_list" && state.failProviderList) throw "IPC_TIMEOUT: synthetic-catalog-private";
+          if (command === "provider_list" && state.emptyProviderList) return { items: [] };
           if (command === "provider_list") return { items: [
             { id: "deepseek", name: "DeepSeek", supportsApiKey: true },
             { id: "other", name: "Other", supportsApiKey: true },
             { id: "oauth", name: "OAuth", supportsApiKey: false },
             ...Object.values(state.configs).map(item => ({ id: item.id, name: item.name, supportsApiKey: true })),
           ] };
+          if (command === "provider_config_list" && state.failConfigList) throw "IPC_TIMEOUT: synthetic-config-private";
           if (command === "provider_config_list") return { items: Object.values(state.configs) };
           if (command === "provider_config_set") {
             state.configs[args.config.id] = { ...args.config };
@@ -146,10 +149,13 @@ async function fixture(run, withChat = false) {
           }
           if (command === "provider_config_delete") { delete state.configs[args.providerId]; return { deleted: true }; }
           if (command === "model_list") {
+            if (state.failModelsFor === args.providerId) throw "IPC_TIMEOUT: synthetic-model-private";
+            if (state.emptyModelsFor === args.providerId) return { items: [] };
             if (args.providerId === "deepseek" && state.delay) await new Promise(r => setTimeout(r, state.delay));
             return { items: [{ id: state.configs[args.providerId]?.modelId ?? args.providerId + "-model", name: args.providerId, api: "openai-completions", contextWindow: 64000, maxTokens: 4096, supportsConnectionTest: args.providerId !== "oauth" }] };
           }
           const status = () => ({ providerId: args.providerId, stored: !!state.stored[args.providerId], type: state.stored[args.providerId] ? "api_key" : null });
+          if (command === "provider_credential_status" && state.failCredentialStatusFor === args.providerId) throw "CREDENTIAL_STORE_UNAVAILABLE: synthetic-credential-private";
           if (command === "provider_credential_status") return status();
           if (command === "provider_credential_set") {
             if (state.holdSave) await new Promise(resolve => { state.releaseSave = resolve; });
@@ -158,6 +164,7 @@ async function fixture(run, withChat = false) {
             return status();
           }
           if (command === "provider_credential_delete") { delete state.stored[args.providerId]; return status(); }
+          if (command === "provider_test" && state.failTest) throw "PROVIDER_TEST_FAILED: synthetic-test-private";
           if (command === "provider_test") return { connected: true, durationMs: 12 };
           throw "Unexpected command: " + command;
         },
@@ -202,9 +209,10 @@ test("服务商切换丢弃未保存密钥，迟到的模型结果不能覆盖�
   await page.waitForTimeout(500);
   assert.equal(await panel.getByLabel("用于测试的模型").inputValue(), "other-model");
   assert.equal(await panel.getByLabel("API Key", { exact: true }).inputValue(), "");
-  await panel.getByLabel("API Key", { exact: true }).fill("discard-on-collapse");
-  await page.getByText("服务商设置", { exact: true }).click();
-  await page.getByText("服务商设置", { exact: true }).click();
+  await panel.getByLabel("API Key", { exact: true }).fill("discard-on-mode-change");
+  await panel.getByRole("button", { name: "自定义配置", exact: true }).click();
+  await panel.getByRole("button", { name: "密钥与连接", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.provider-editor[aria-busy="true"]'));
   assert.equal(await panel.getByLabel("API Key", { exact: true }).inputValue(), "");
 }));
 
@@ -780,3 +788,72 @@ test("输入区 Enter 换行，组合输入不发送，Ctrl 或 Command Enter �
   await page.getByRole('navigation', { name: '工作区导航' }).getByRole('button', { name: '会话', exact: true }).click();
   assert.equal(await page.evaluate(() => window.fixture.submitArgs.length), 2);
 }, true));
+
+
+test("服务商读取失败可重试，空目录提供自定义配置入口且不回显底层错误", async () => fixture(async (page, panel) => {
+  await page.evaluate(() => { window.fixture.failProviderList = true; });
+  await panel.getByRole('button', { name: '刷新服务商', exact: true }).click();
+  await panel.getByRole('button', { name: '重试读取服务商', exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('服务商', { exact: true }).isDisabled(), true);
+  assert.equal(await panel.getByLabel('API Key', { exact: true }).count(), 0);
+  assert.equal((await panel.innerText()).includes('synthetic-catalog-private'), false);
+  await page.evaluate(() => { window.fixture.failProviderList = false; window.fixture.emptyProviderList = true; });
+  await panel.getByRole('button', { name: '重试读取服务商', exact: true }).click();
+  await panel.getByRole('button', { name: '添加自定义服务商', exact: true }).click();
+  await panel.getByText('尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。', { exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('配置标识', { exact: true }).isEnabled(), true);
+}));
+
+test("模型目录失败不阻止管理已知凭据，空模型与失败分别提示，凭据失败仍禁止写入", async () => fixture(async (page, panel) => {
+  await page.evaluate(() => { window.fixture.failModelsFor = 'deepseek'; });
+  await panel.getByRole('button', { name: '刷新状态', exact: true }).click();
+  await panel.getByText('模型目录读取失败，可刷新状态重试。', { exact: true }).waitFor();
+  await panel.getByLabel('API Key', { exact: true }).fill('synthetic-independent-key');
+  await panel.getByRole('button', { name: '保存 API Key', exact: true }).click();
+  await panel.getByText('API Key 已保存到 Windows 凭据管理器。', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('button', { name: '删除已保存凭据', exact: true }).isEnabled(), true);
+  assert.equal(await panel.getByRole('button', { name: '测试连接', exact: true }).isDisabled(), true);
+  assert.equal((await panel.innerText()).includes('synthetic-model-private'), false);
+  await page.evaluate(() => { window.fixture.failModelsFor = null; window.fixture.emptyModelsFor = 'deepseek'; });
+  await panel.getByRole('button', { name: '刷新状态', exact: true }).click();
+  await panel.getByText('该服务商暂无模型。可刷新状态，或在“自定义配置”中添加兼容服务商。', { exact: true }).waitFor();
+  assert.equal(await panel.getByText('模型目录读取失败，可刷新状态重试。', { exact: true }).count(), 0);
+  await page.evaluate(() => { window.fixture.emptyModelsFor = null; window.fixture.failCredentialStatusFor = 'deepseek'; });
+  await panel.getByRole('button', { name: '刷新状态', exact: true }).click();
+  await panel.getByText('无法访问系统凭据管理器，请稍后重试。', { exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('API Key', { exact: true }).isDisabled(), true);
+  assert.equal(await panel.getByRole('button', { name: '保存 API Key', exact: true }).isDisabled(), true);
+  assert.equal(await panel.getByRole('button', { name: '测试连接', exact: true }).isDisabled(), true);
+  assert.equal((await panel.innerText()).includes('synthetic-credential-private'), false);
+  await page.evaluate(() => { window.fixture.failCredentialStatusFor = null; });
+  await panel.getByRole('button', { name: '刷新状态', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.provider-editor[aria-busy="true"]'));
+  assert.equal(await panel.getByRole('button', { name: '测试连接', exact: true }).isEnabled(), true);
+  await page.evaluate(() => { window.fixture.failTest = true; });
+  await panel.getByRole('button', { name: '测试连接', exact: true }).click();
+  const connection = panel.getByRole('region', { name: '2. 测试模型连接', exact: true });
+  await connection.getByRole('alert').filter({ hasText: '连接失败，请检查 API Key、模型权限或网络。' }).waitFor();
+  assert.equal(await panel.getByRole('region', { name: '1. 保存访问凭据', exact: true }).getByRole('alert').count(), 0);
+  assert.equal(await panel.getByRole('button', { name: '删除已保存凭据', exact: true }).isEnabled(), true);
+  assert.equal((await panel.innerText()).includes('synthetic-test-private'), false);
+}));
+
+test("自定义配置读取失败可恢复，重试后表单可保存并进入凭据设置", async () => fixture(async (page, panel) => {
+  await page.evaluate(() => { window.fixture.failConfigList = true; });
+  await panel.getByRole('button', { name: '自定义配置', exact: true }).click();
+  await panel.getByRole('button', { name: '重试读取配置', exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('配置标识', { exact: true }).isDisabled(), true);
+  assert.equal((await panel.innerText()).includes('synthetic-config-private'), false);
+  await page.evaluate(() => { window.fixture.failConfigList = false; });
+  await panel.getByRole('button', { name: '重试读取配置', exact: true }).click();
+  await panel.getByText('尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。', { exact: true }).waitFor();
+  await panel.getByLabel('配置标识', { exact: true }).fill('custom-recovered');
+  await panel.getByLabel('显示名称', { exact: true }).fill('重试恢复的服务商');
+  await panel.getByLabel('API 基础地址', { exact: true }).fill('https://model.example.test/v1');
+  await panel.getByLabel('模型 ID', { exact: true }).fill('recovered-model');
+  await panel.getByRole('button', { name: '保存配置', exact: true }).click();
+  await panel.getByText('配置已保存，可设置 API Key 并测试连接。', { exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('服务商', { exact: true }).inputValue(), 'custom-recovered');
+  await panel.getByRole('heading', { name: '1. 保存访问凭据', exact: true }).waitFor();
+  await panel.getByRole('heading', { name: '2. 测试模型连接', exact: true }).waitFor();
+}));

@@ -570,3 +570,15 @@ footer {
   .transcript-entry.message-user { margin-left: 12px; }
   .conversation-list { max-height: 28vh; }
 }
+
+/* 服务商设置操作分区 */
+.provider-settings > h3 { margin: 0 0 8px; font-size: 17px; }
+.provider-mode-picker { margin: 18px 0; }
+.provider-mode-picker button[aria-pressed="true"] { background: #23344c; border-color: #45658a; }
+.provider-step { padding: 20px; margin-top: 16px; border: 1px solid #303946; border-radius: 9px; background: #141a21; }
+.provider-step h3 { margin: 0 0 16px; font-size: 15px; }
+.provider-empty { padding: 16px; border: 1px dashed #414c5c; border-radius: 8px; color: #b7c3d3; font-size: 13px; line-height: 1.7; }
+.provider-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.provider-config-grid > p, .provider-config-grid > .provider-actions { grid-column: 1 / -1; margin: 0; }
+.provider-settings .error button { margin: 8px 0 0 12px; }
+@media (max-width: 650px) { .provider-config-grid { grid-template-columns: 1fr; } .provider-step { padding: 14px; } }

@@ -71,10 +71,13 @@ export default function CustomProviderSettings({ onSaved, onBusy }: {
   }
   return (
     <div className="provider-editor" aria-busy={busy || loading}>
+      <h3>自定义服务商配置</h3>
       <p className="muted">OpenAI 兼容 Chat Completions 接口；每个配置先支持一个文本模型。</p>
       <button type="button" disabled={busy || loading} onClick={() => { choose(""); setRevision((value) => value + 1); }}>刷新配置</button>
+      {loading && <p className="muted" role="status">正在读取自定义配置...</p>}
+      {!loading && !loadError && items.length === 0 && <p className="provider-empty" role="status">尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。</p>}
       <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
-        <fieldset className="provider-config-fields" disabled={busy || loading || loadError}>
+        <fieldset className="provider-config-fields provider-config-grid" disabled={busy || loading || loadError}>
           <label className="provider-field"><span>编辑配置</span>
             <select aria-label="编辑配置" value={selected} onChange={(event) => choose(event.target.value)}>
               <option value="">新建自定义服务商</option>
@@ -110,7 +113,9 @@ export default function CustomProviderSettings({ onSaved, onBusy }: {
           {selected && <p className="muted">如需清除密钥，请先在“密钥与连接”中删除凭据，再删除配置。</p>}
         </fieldset>
       </form>
-      {error && <div className="error" role="alert">{error}</div>}
+      {error && <div className="error" role="alert">{error}
+        {loadError && <button type="button" disabled={busy || loading} onClick={() => { choose(""); setRevision((value) => value + 1); }}>重试读取配置</button>}
+      </div>}
     </div>
   );
 }

@@ -34,6 +34,8 @@ function errorMessage(cause: unknown): string {
 
 function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (busy: boolean) => void }) {
   const [models, setModels] = useState<Model[]>([]);
+  const [modelsError, setModelsError] = useState("");
+  const [testError, setTestError] = useState("");
   const [modelId, setModelId] = useState("");
   const [credential, setCredential] = useState<CredentialStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,20 +62,26 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
     setError("");
     setNotice("");
     setCredential(null);
+    setModels([]);
+    setModelsError("");
+    setTestError("");
     if (password.current) password.current.value = "";
     setHasKey(false);
-    void Promise.all([
+    void Promise.allSettled([
       invoke<{ items: Model[] }>("model_list", { providerId: provider.id }),
       invoke<CredentialStatus>("provider_credential_status", { providerId: provider.id }),
     ]).then(([catalog, status]) => {
       if (!active) return;
-      setModels(catalog.items);
-      setModelId((current) => catalog.items.some((model) => model.id === current) ? current : (catalog.items[0]?.id ?? ""));
-      setCredential(status);
-    }).catch((cause: unknown) => {
-      if (active) setError(errorMessage(cause));
-    }).finally(() => {
-      if (active) setLoading(false);
+      if (catalog.status === "fulfilled") {
+        setModels(catalog.value.items);
+        setModelId((current) => catalog.value.items.some((model) => model.id === current) ? current : (catalog.value.items[0]?.id ?? ""));
+      } else {
+        setModelId("");
+        setModelsError("模型目录读取失败，可刷新状态重试。");
+      }
+      if (status.status === "fulfilled") setCredential(status.value);
+      else setError(errorMessage(status.reason));
+      setLoading(false);
     });
     return () => { active = false; };
   }, [provider.id, revision]);
@@ -85,6 +93,7 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
     setAction(next);
     onBusy(true);
     setError("");
+    setTestError("");
     setNotice("");
     try {
       if (next === "save") {
@@ -111,7 +120,8 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
       }
     } catch (cause: unknown) {
       if (mounted.current) {
-        setError(errorMessage(cause));
+        if (next === "test") setTestError(errorMessage(cause));
+        else setError(errorMessage(cause));
         // 超时或失败后不能把旧状态当成实际结果，要求重新查询。
         if (next !== "test") setCredential(null);
       }
@@ -126,20 +136,15 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
   const busy = action !== null;
   return (
     <div className="provider-editor" aria-busy={loading || busy}>
+      {notice && <p className="provider-notice" role="status">{notice}</p>}
+      <section className="provider-step" aria-labelledby="credential-heading">
+      <h3 id="credential-heading">1. 保存访问凭据</h3>
       <div className="provider-status" role="status">
         {loading ? "正在读取服务商设置..." : credential ? (
           credential.stored ? `已保存${credential.type === "oauth" ? " OAuth 凭据" : " API Key"}` : "尚未保存 API Key"
         ) : "凭据状态待确认"}
         <button type="button" disabled={loading || busy} onClick={() => setRevision((value) => value + 1)}>刷新状态</button>
       </div>
-      <label className="provider-field">
-        <span>用于测试的模型</span>
-        <select aria-label="用于测试的模型" value={modelId} disabled={loading || busy || models.length === 0} onChange={(event) => { setModelId(event.target.value); setNotice(""); setError(""); }}>
-          {models.length === 0 && <option value="">暂无可选模型</option>}
-          {models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
-        </select>
-      </label>
-      {selected && <p className="muted">上下文 {selected.contextWindow.toLocaleString()} token · 最大输出 {selected.maxTokens.toLocaleString()} token</p>}
       {provider.supportsApiKey ? (
         <form onSubmit={(event) => { event.preventDefault(); void perform("save"); }}>
           <label className="provider-field">
@@ -155,15 +160,30 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
           </div>
         </form>
       ) : <p className="muted">该服务商需要 OAuth 或其他配置，当前设置面板仅支持 API Key。</p>}
+      {error && <div className="error" role="alert">{error}</div>}
+      </section>
+      <section className="provider-step" aria-labelledby="connection-heading">
+      <h3 id="connection-heading">2. 测试模型连接</h3>
+      <p className="muted">保存密钥后，选择模型并测试。凭据已保存不代表连接已经通过测试。</p>
+      <label className="provider-field">
+        <span>用于测试的模型</span>
+        <select aria-label="用于测试的模型" value={modelId} disabled={loading || busy || models.length === 0} onChange={(event) => { setModelId(event.target.value); setNotice(""); setTestError(""); }}>
+          {models.length === 0 && <option value="">暂无可选模型</option>}
+          {models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
+        </select>
+      </label>
+      {selected && <p className="muted">上下文 {selected.contextWindow.toLocaleString()} token · 最大输出 {selected.maxTokens.toLocaleString()} token</p>}
+      {!loading && modelsError && <div className="error" role="alert">{modelsError}</div>}
+      {!loading && !modelsError && models.length === 0 && <p className="provider-empty" role="status">该服务商暂无模型。可刷新状态，或在“自定义配置”中添加兼容服务商。</p>}
       <div className="provider-test-row">
         <button type="button" disabled={loading || busy || hasKey || !selected?.supportsConnectionTest || !credential?.stored || credential.type !== "api_key"}
           onClick={() => void perform("test")}>{action === "test" ? "正在测试连接..." : "测试连接"}</button>
         <span className="muted">会发送一个简短模型请求，可能产生少量费用。</span>
       </div>
+      {testError && <div className="error" role="alert">{testError}</div>}
       {hasKey && <p className="muted">请先保存新 Key，再测试连接。</p>}
       {selected && !selected.supportsConnectionTest && <p className="muted">该模型接口暂不支持连接测试。</p>}
-      {notice && <p className="provider-notice" role="status">{notice}</p>}
-      {error && <div className="error" role="alert">{error}</div>}
+      </section>
     </div>
   );
 }
@@ -175,7 +195,6 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
-  const [expanded, setExpanded] = useState(true);
   const [managing, setManaging] = useState(false);
   const [configNotice, setConfigNotice] = useState("");
   useEffect(() => {
@@ -196,10 +215,9 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
   const provider = providers.find((item) => item.id === providerId);
   return (
     <section className="panel provider-settings" aria-labelledby="provider-heading">
-      <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-        <summary id="provider-heading">服务商设置</summary>
+      <h3 id="provider-heading">服务商设置</h3>
         <p className="muted">管理服务商密钥并检查模型连接。</p>
-        <div className="provider-actions">
+        <div className="provider-actions provider-mode-picker" role="group" aria-label="设置操作">
           <button type="button" disabled={busy} aria-pressed={!managing} onClick={() => setManaging(false)}>密钥与连接</button>
           <button type="button" disabled={busy} aria-pressed={managing} onClick={() => { setManaging(true); setConfigNotice(""); }}>自定义配置</button>
         </div>
@@ -207,7 +225,7 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
         {!managing && <>
         <div className="section-heading">
           <label className="provider-field provider-picker"><span>服务商</span>
-            <select aria-label="服务商" value={providerId} disabled={loading || busy || providers.length === 0} onChange={(event) => setProviderId(event.target.value)}>
+            <select aria-label="服务商" value={providerId} disabled={loading || busy || Boolean(error) || providers.length === 0} onChange={(event) => setProviderId(event.target.value)}>
               {providers.length === 0 && <option value="">暂无服务商</option>}
               {providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
@@ -215,16 +233,21 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
           <button type="button" disabled={loading || busy} onClick={() => setRevision((value) => value + 1)}>刷新服务商</button>
         </div>
         {loading && <p className="muted">正在读取服务商列表...</p>}
-        {error && <div className="error" role="alert">{error}</div>}
-        {(expanded || busy) && !loading && !error && provider && <ProviderEditor key={provider.id} provider={provider} onBusy={handleBusy} />}
+        {error && <div className="error" role="alert">{error}
+          <button type="button" disabled={loading || busy} onClick={() => setRevision((value) => value + 1)}>重试读取服务商</button>
+        </div>}
+        {!loading && !error && providers.length === 0 && <div className="provider-empty" role="status">
+          <p>暂无可用服务商。可以刷新目录，或添加自定义服务商。</p>
+          <button type="button" onClick={() => { setManaging(true); setConfigNotice(""); }}>添加自定义服务商</button>
+        </div>}
+        {!loading && !error && provider && <ProviderEditor key={provider.id} provider={provider} onBusy={handleBusy} />}
         </>}
-        {managing && (expanded || busy) && <CustomProviderSettings onBusy={handleBusy} onSaved={(id) => {
+        {managing && <CustomProviderSettings onBusy={handleBusy} onSaved={(id) => {
           setProviderId(id ?? "deepseek");
           setRevision((value) => value + 1);
           setManaging(false);
           setConfigNotice(id ? "配置已保存，可设置 API Key 并测试连接。" : "配置已删除，系统凭据保持不变。");
         }} />}
-      </details>
     </section>
   );
 }
