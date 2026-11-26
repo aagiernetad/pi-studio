@@ -1,4 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { AgentDoc, ConversationBusy, InboxDoc, LiveDoc, ResetEntry, configure, type ConversationId, type SubmissionRecord, type Tx } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import { RuntimeApplicationError } from "../protocol/errors.js";
@@ -11,6 +12,7 @@ const ConversationParams = z.object({ conversationId: z.number().int().positive(
 const SubmitParams = ConversationParams.extend({
   requestId: z.uuid(), providerId: z.string().trim().min(1).max(128),
   modelId: z.string().trim().min(1).max(256), content: z.string().trim().min(1).max(8000),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("off"),
 });
 const ResumeParams = ConversationParams.extend({ requestId: z.uuid() });
 const ResetParams = ConversationParams.extend({ requestId: z.uuid() });
@@ -41,13 +43,21 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
   registry.register("conversation.chat.submit", async (request, context) => {
     const input = params(SubmitParams, request.params);
     const conversation = await visible(input.conversationId);
+    function checkThinkingLevel() {
+      const model = host.models.getModel(input.providerId, input.modelId);
+      if (!model) throw new RuntimeApplicationError("MODEL_NOT_FOUND", "Model is unavailable.");
+      if (!getSupportedThinkingLevels(model).includes(input.thinkingLevel)) {
+        throw new RuntimeApplicationError("THINKING_LEVEL_UNSUPPORTED", "Model does not support the requested thinking level.");
+      }
+    }
     async function existing(tx: Tx): Promise<SubmissionRecord | undefined> {
       const prior = await tx.submissionByRequest(conversation.id, input.requestId);
       if (!prior) return undefined;
       const entry = prior.entry ? await tx.entry(prior.entry) : undefined;
       const metadata = entry?.data;
       if (prior.type !== "input" || !metadata || typeof metadata !== "object" || Array.isArray(metadata) ||
-        metadata.providerId !== input.providerId || metadata.modelId !== input.modelId || entry?.model?.[0]?.role !== "user" || entry.model[0].content !== input.content) {
+        metadata.providerId !== input.providerId || metadata.modelId !== input.modelId ||
+        (metadata.thinkingLevel ?? "off") !== input.thinkingLevel || entry?.model?.[0]?.role !== "user" || entry.model[0].content !== input.content) {
         throw new RuntimeApplicationError("REQUEST_ID_CONFLICT", "Request id was used for another input.");
       }
       return prior;
@@ -55,19 +65,22 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
     // 原生 requestId 去重不依赖当前凭据或模型目录是否仍可用。
     const prior = await host.harness.commit(existing, BACKGROUND_CONTEXT);
     if (prior) return { submissionId: prior.id };
+    checkThinkingLevel();
     await checkModel(input.providerId, input.modelId, context.signal);
     try {
       const submissionId = await host.harness.commit(async (tx) => {
         context.signal.throwIfAborted();
         const concurrent = await existing(tx);
         if (concurrent) return concurrent.id;
+        // 凭据读取期间目录可能已刷新；按提交落盘时的能力再次校验。
+        checkThinkingLevel();
         const id = await conversation.submit(tx, {
           type: "input", requestId: input.requestId, content: input.content, whenBusy: "reject",
-          entry: { kind: "studio.chat-input", data: { providerId: input.providerId, modelId: input.modelId } },
+          entry: { kind: "studio.chat-input", data: { providerId: input.providerId, modelId: input.modelId, thinkingLevel: input.thinkingLevel } },
         });
         await configure(tx, conversation.id, {
           model: { provider: input.providerId, modelId: input.modelId },
-          tools: [], extensions: [], modelTools: [], thinkingLevel: "off", maxTurns: 1,
+          tools: [], extensions: [], modelTools: [], thinkingLevel: input.thinkingLevel, maxTurns: 1,
         });
         return id;
       }, BACKGROUND_CONTEXT);
@@ -169,6 +182,7 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
       return {
         conversationId, running: Boolean(live.run), latestEntryId: latest ?? null,
         model: agent.model ? { providerId: agent.model.provider, modelId: agent.model.modelId } : null,
+        thinkingLevel: agent.thinkingLevel ?? "off",
         failureReason: contextReset ? null : live.runFailure?.reason ?? null,
         canResume: !contextReset && !live.run && Boolean(live.runFailure && resumableReasons.has(live.runFailure.reason)),
         contextReset,

@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createModels, type Models } from "@earendil-works/pi-ai/models";
+import { createModels, getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 import {
@@ -64,10 +64,31 @@ test("catalog handlers list built-ins without auth or remote operations", async 
     assert.equal(items.length, models.getModels(providerId).length);
     assert.ok(items.length > 0);
     assert.ok(items.every((item) => item.provider === providerId));
+    for (const item of items) {
+      const model = models.getModel(providerId, item.id);
+      assert.ok(model);
+      assert.deepEqual(item.thinkingLevels, getSupportedThinkingLevels(model));
+    }
     assert.deepEqual(items.map((item) => item.id),
       models.getModels(providerId).map((model) => model.id)
         .sort((a, b) => a.localeCompare(b)));
   }
+});
+
+test("catalog thinking levels use native model mappings including mandatory reasoning and extended levels", async () => {
+  const provider = builtinModels().getProvider("deepseek");
+  assert.ok(provider);
+  const model = provider.getModels()[0];
+  assert.ok(model);
+  const models = createModels();
+  models.setProvider({ ...provider, getModels: () => [{
+    ...model, reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: "high", max: null },
+  }] });
+  const result = await requester(models)("model.list", { providerId: provider.id });
+  assert.ok(result.success);
+  assert.ok(Array.isArray(result.result.items));
+  assert.deepEqual(result.result.items[0].thinkingLevels, ["low", "high", "xhigh"]);
 });
 
 test("catalog handlers read the live collection and expose only allowed fields", async () => {
@@ -106,6 +127,7 @@ test("catalog handlers read the live collection and expose only allowed fields",
     provider: model.provider,
     api: model.api,
     reasoning: model.reasoning,
+    thinkingLevels: getSupportedThinkingLevels(model),
     input: [...model.input],
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
@@ -193,19 +215,27 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
       { id: "config-params", method: "provider.config.set", params: {} },
       { id: "chat-params", method: "conversation.chat.submit", params: {} },
       { id: "resume-params", method: "conversation.chat.resume", params: {} },
+      { id: "context-params", method: "conversation.context.usage", params: {} },
+      { id: "context-hidden", method: "conversation.context.usage", params: { conversationId: 1 } },
     ];
-    child.stdin.end(requests.map((request) => JSON.stringify({
-      version: 1, kind: "request", ...request,
-    }) + "\n").join(""));
+    // 逐项核对路由，避免测试请求数增长后触发 Runtime 的并发上限。
+    let next = 0;
+    function sendNext() {
+      const request = requests[next++];
+      if (request) child.stdin.write(JSON.stringify({ version: 1, kind: "request", ...request }) + "\n");
+      else child.stdin.end();
+    }
+    sendNext();
 
     const responses = new Map<string, RuntimeResponse>();
     for await (const line of createInterface({ input: child.stdout })) {
       const response = RuntimeResponseSchema.parse(JSON.parse(line));
       responses.set(response.id, response);
+      sendNext();
     }
     const [code] = await closed;
     assert.equal(code, 0);
-    assert.equal(responses.size, 8);
+    assert.equal(responses.size, 10);
     const providers = responses.get("providers");
     assert.ok(providers?.success);
     assert.ok(Array.isArray(providers.result.items));
@@ -232,6 +262,12 @@ test("Runtime entry serves catalogs over real JSONL IPC", { timeout: 20_000 }, a
     const invalidResume = responses.get("resume-params");
     assert.ok(invalidResume && !invalidResume.success);
     assert.equal(invalidResume.error.code, "INVALID_PARAMS");
+    const invalidContext = responses.get("context-params");
+    assert.ok(invalidContext && !invalidContext.success);
+    assert.equal(invalidContext.error.code, "INVALID_PARAMS");
+    const hiddenContext = responses.get("context-hidden");
+    assert.ok(hiddenContext && !hiddenContext.success);
+    assert.equal(hiddenContext.error.code, "CONVERSATION_NOT_FOUND");
   } finally {
     if (child.exitCode === null) child.kill();
     await closed;

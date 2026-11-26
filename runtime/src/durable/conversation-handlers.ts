@@ -1,5 +1,6 @@
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { UsageDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { z } from "zod";
 
@@ -144,6 +145,48 @@ export function registerConversationHandlers(
       }),
       nextAfterModel: models.length > page.length ? page.at(-1) ?? null : null,
     };
+  });
+
+  registry.register("conversation.context.usage", async (request, context) => {
+    const parsed = GetParams.safeParse(request.params);
+    if (!parsed.success) throw invalidParams("conversation.context.usage");
+    const { conversationId } = parsed.data;
+    if (!await getUserConversation(host.harness, conversationId)) {
+      throw new RuntimeApplicationError("CONVERSATION_NOT_FOUND", "Conversation is not visible.");
+    }
+    const conversation = await host.conversation(conversationId as ConversationId);
+    if (!conversation) throw new RuntimeApplicationError("CONVERSATION_NOT_FOUND", "Conversation does not exist.");
+    context.signal.throwIfAborted();
+    // 原生 context 已处理 reset、fork、edits 和失败回复排除；不从累计账本推算。
+    const view = await conversation.context(BACKGROUND_CONTEXT);
+    context.signal.throwIfAborted();
+    const latestEntryId = view.entries.reduce<number | null>((last, entry) => Math.max(last ?? 0, entry.id), null);
+    let assistant: AssistantMessage | undefined;
+    for (let index = view.messages.length - 1; index >= 0; index--) {
+      const message = view.messages[index];
+      if (message?.role === "assistant") { assistant = message; break; }
+    }
+    let lastRequest = null;
+    if (assistant?.role === "assistant") {
+      const input = tokenCount(assistant.usage.input);
+      const cacheRead = tokenCount(assistant.usage.cacheRead);
+      const cacheWrite = tokenCount(assistant.usage.cacheWrite);
+      // pi-ai 的 input 不含缓存；reasoning 已包含在 output，不重复相加。
+      const inputTokens = input === null || cacheRead === null || cacheWrite === null ? null : tokenCount(input + cacheRead + cacheWrite);
+      if (inputTokens !== null && inputTokens > 0) {
+        const model = host.models.getModel(assistant.provider, assistant.model);
+        const capacity = tokenCount(model?.contextWindow);
+        lastRequest = {
+          providerId: assistant.provider, modelId: assistant.model,
+          inputTokens, outputTokens: tokenCount(assistant.usage.output),
+          cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
+          reasoningTokens: tokenCount(assistant.usage.reasoning),
+          contextWindow: capacity && capacity > 0 ? capacity : null,
+        };
+      }
+    }
+    const empty = !view.messages.some(message => message.role !== "system");
+    return { conversationId, latestEntryId, state: empty ? "empty" : lastRequest ? "reported" : "unreported", lastRequest };
   });
 
   registry.register("conversation.get", async (request) => {

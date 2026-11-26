@@ -152,6 +152,19 @@ async fn conversation_usage(
     call_runtime(state.client.clone(), "conversation.usage", params).await
 }
 
+#[tauri::command]
+async fn conversation_context_usage(
+    state: State<'_, RuntimeState>,
+    conversation_id: i64,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "conversation.context.usage",
+        json!({ "conversationId": conversation_id }),
+    )
+    .await
+}
+
 /// 根据 ID 查询用户可见的会话。
 #[tauri::command]
 async fn conversation_get(
@@ -426,6 +439,7 @@ pub fn run() {
             conversation_rename,
             conversation_fork,
             conversation_usage,
+            conversation_context_usage,
             conversation_get,
             conversation_entries,
             provider_list,

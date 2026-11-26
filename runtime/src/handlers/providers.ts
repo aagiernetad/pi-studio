@@ -1,4 +1,4 @@
-import type { Models } from "@earendil-works/pi-ai/models";
+import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import { z } from "zod";
 
 import { RuntimeApplicationError } from "../protocol/errors.js";
@@ -73,6 +73,7 @@ export function registerProviderHandlers(
         provider: model.provider,
         api: model.api,
         reasoning: model.reasoning,
+        thinkingLevels: getSupportedThinkingLevels(model),
         input: [...model.input],
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,

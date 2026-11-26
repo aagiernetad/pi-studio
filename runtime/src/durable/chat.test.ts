@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { LiveDoc, UsageDoc, type ConversationId, type SubmissionId } from "@earendil-works/pi-durable";
+import { AgentDoc, LiveDoc, UsageDoc, type ConversationId, type SubmissionId } from "@earendil-works/pi-durable";
 import { DurableHost } from "./host.js";
 import { createUserConversation } from "./conversations.js";
 import { registerChatHandlers } from "./chat-handlers.js";
@@ -80,6 +80,7 @@ async function fixture(context: TestContext) {
     get host() { return host; }, credentials, conversation, config, calls, request, settled,
     setMode(next: typeof mode) { mode = next; },
     enableUsage() { reportUsage = true; },
+    disableUsage() { reportUsage = false; },
     input(content = "你好") { return { conversationId: conversation.id, requestId: randomUUID(), providerId: config.id, modelId: config.modelId, content }; },
     async reopen() { await host.close(); host = await DurableHost.open(directory, credentials); },
   };
@@ -138,6 +139,114 @@ test("chat rejects busy conversation and native abort stops its generation", { t
   assert.equal(status.result.failureReason, "aborted");
 });
 
+test("thinking levels reach the native request and survive resume, reopen and idempotent retry", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  function reasoningModel() {
+    const provider = f.host.models.getProvider(f.config.id);
+    assert.ok(provider);
+    const models = provider.getModels();
+    f.host.models.setProvider({ ...provider, getModels: () => models.map(model => ({
+      ...model, reasoning: true,
+      thinkingLevelMap: { off: "none", minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null },
+      compat: { ...model.compat, supportsReasoningEffort: true },
+    })) });
+  }
+  reasoningModel();
+  f.setMode("error");
+  const input = { ...f.input(), thinkingLevel: "high" };
+  const first = await f.request("conversation.chat.submit", input);
+  assert.ok(first.success);
+  assert.equal((await f.settled(first.result.submissionId)).status, "unanswered");
+  assert.equal(f.calls[0]?.reasoning_effort, "high");
+  await f.reopen();
+  reasoningModel();
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success);
+  assert.equal(status.result.thinkingLevel, "high");
+  assert.equal(status.result.canResume, true);
+  f.setMode("success");
+  const resumed = await f.request("conversation.chat.resume", { conversationId: f.conversation.id, requestId: randomUUID() });
+  assert.ok(resumed.success);
+  assert.equal((await f.settled(resumed.result.submissionId)).status, "done");
+  assert.equal(f.calls[1]?.reasoning_effort, "high");
+  const conflict = await f.request("conversation.chat.submit", { ...input, thinkingLevel: "low" });
+  assert.ok(!conflict.success);
+  assert.equal(conflict.error.code, "REQUEST_ID_CONFLICT");
+  await f.credentials.delete(f.config.id);
+  f.host.models.deleteProvider(f.config.id);
+  const retry = await f.request("conversation.chat.submit", input);
+  assert.ok(retry.success);
+  assert.equal(retry.result.submissionId, first.result.submissionId);
+  assert.equal(f.calls.length, 2);
+  const agent = await f.host.harness.snapshot(AgentDoc, f.conversation.id as ConversationId, BACKGROUND_CONTEXT);
+  assert.equal(agent?.thinkingLevel, "high");
+});
+
+test("invalid or unsupported thinking levels leave conversation state unchanged and do not call models", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  for (const [thinkingLevel, code] of [["high", "THINKING_LEVEL_UNSUPPORTED"], ["auto", "INVALID_PARAMS"], [42, "INVALID_PARAMS"], [null, "INVALID_PARAMS"]]) {
+    const result = await f.request("conversation.chat.submit", { ...f.input(), thinkingLevel });
+    assert.ok(!result.success);
+    assert.equal(result.error.code, code);
+  }
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success);
+  assert.equal(status.result.latestEntryId, null);
+  assert.equal(f.calls.length, 0);
+  const input = f.input();
+  const first = await f.request("conversation.chat.submit", input);
+  assert.ok(first.success);
+  await f.settled(first.result.submissionId);
+  const retry = await f.request("conversation.chat.submit", { ...input, thinkingLevel: "off" });
+  assert.ok(retry.success);
+  assert.equal(retry.result.submissionId, first.result.submissionId);
+});
+
+test("legacy input without thinking metadata still deduplicates after reopen", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const input = f.input();
+  const conversation = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(conversation);
+  const submissionId = await f.host.harness.commit(tx => conversation.submit(tx, {
+    type: "input", requestId: input.requestId, content: input.content,
+    entry: { kind: "studio.chat-input", data: { providerId: input.providerId, modelId: input.modelId } },
+  }), BACKGROUND_CONTEXT);
+  f.host.harness.resume();
+  await f.settled(submissionId);
+  await f.reopen();
+  await f.credentials.delete(f.config.id);
+  const retry = await f.request("conversation.chat.submit", input);
+  assert.ok(retry.success);
+  assert.equal(retry.result.submissionId, submissionId);
+  const explicitOff = await f.request("conversation.chat.submit", { ...input, thinkingLevel: "off" });
+  assert.ok(explicitOff.success);
+  assert.equal(explicitOff.result.submissionId, submissionId);
+  const conflict = await f.request("conversation.chat.submit", { ...input, thinkingLevel: "high" });
+  assert.ok(!conflict.success);
+  assert.equal(conflict.error.code, "REQUEST_ID_CONFLICT");
+  assert.equal(f.calls.length, 0);
+});
+
+test("model capability changes during credential lookup are rejected before submission", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const checkAuth = f.host.models.checkAuth.bind(f.host.models);
+  context.mock.method(f.host.models, "checkAuth", async (...args: Parameters<typeof checkAuth>) => {
+    const auth = await checkAuth(...args);
+    const provider = f.host.models.getProvider(f.config.id);
+    assert.ok(provider);
+    const models = provider.getModels();
+    f.host.models.setProvider({ ...provider, getModels: () => models.map(model => ({ ...model, reasoning: true, thinkingLevelMap: { off: null } })) });
+    return auth;
+  });
+  const result = await f.request("conversation.chat.submit", f.input());
+  assert.ok(!result.success);
+  assert.equal(result.error.code, "THINKING_LEVEL_UNSUPPORTED");
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success);
+  assert.equal(status.result.latestEntryId, null);
+  assert.equal(f.calls.length, 0);
+});
+
 test("upstream authentication errors are sanitized before Durable stores entries, status and task outcome", { timeout: 20_000 }, async (context) => {
   const f = await fixture(context);
   f.setMode("error");
@@ -162,7 +271,7 @@ test("upstream authentication errors are sanitized before Durable stores entries
 test("chat validates parameters, credentials and user visibility without creating a model request", { timeout: 20_000 }, async (context) => {
   const f = await fixture(context);
   const root = await f.host.root();
-  for (const method of ["conversation.chat.submit", "conversation.chat.status", "conversation.chat.abort", "conversation.chat.resume", "conversation.usage", "conversation.context.reset"]) {
+  for (const method of ["conversation.chat.submit", "conversation.chat.status", "conversation.chat.abort", "conversation.chat.resume", "conversation.usage", "conversation.context.usage", "conversation.context.reset"]) {
     const input = method.endsWith("submit") ? { ...f.input(), conversationId: root.id } : method.endsWith("resume") || method.endsWith("reset") ? { conversationId: root.id, requestId: randomUUID() } : { conversationId: root.id };
     const hidden = await f.request(method, input);
     assert.ok(!hidden.success);
@@ -178,6 +287,100 @@ test("chat validates parameters, credentials and user visibility without creatin
   assert.ok(!missing.success);
   assert.equal(missing.error.code, "PROVIDER_NOT_CONFIGURED");
   assert.equal(f.calls.length, 0);
+});
+
+test("context usage reads the last request including cache, not cumulative spend, without auth or model calls", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const empty = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(empty.success);
+  assert.equal(empty.result.state, "empty");
+  assert.equal(empty.result.lastRequest, null);
+  f.enableUsage();
+  for (const content of ["第一轮", "第二轮"]) {
+    const sent = await f.request("conversation.chat.submit", f.input(content));
+    assert.ok(sent.success);
+    await f.settled(sent.result.submissionId);
+  }
+  const measured = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(measured.success);
+  assert.equal(measured.result.state, "reported");
+  assert.deepEqual(measured.result.lastRequest, {
+    providerId: f.config.id, modelId: f.config.modelId, inputTokens: 12, outputTokens: 5,
+    cacheReadTokens: 2, cacheWriteTokens: 0, reasoningTokens: 3, contextWindow: 32768,
+  });
+  assert.equal(JSON.stringify(measured).includes("synthetic-chat-secret"), false);
+  await f.reopen();
+  await f.credentials.delete(f.config.id);
+  const restored = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(restored.success);
+  assert.deepEqual(restored.result, measured.result);
+  f.host.models.deleteProvider(f.config.id);
+  const missingCatalog = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(missingCatalog.success);
+  assert.deepEqual(missingCatalog.result.lastRequest, { ...measured.result.lastRequest as object, contextWindow: null });
+  assert.equal(f.calls.length, 2);
+  for (const params of [{}, { conversationId: -1 }, { conversationId: f.conversation.id, apiKey: "private" }]) {
+    const invalid = await f.request("conversation.context.usage", params);
+    assert.ok(!invalid.success);
+    assert.equal(invalid.error.code, "INVALID_PARAMS");
+  }
+});
+
+test("context usage respects native reset and fork boundaries and does not inherit cumulative totals", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.enableUsage();
+  const sent = await f.request("conversation.chat.submit", f.input());
+  assert.ok(sent.success);
+  await f.settled(sent.result.submissionId);
+  const source = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(source);
+  const entries = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const answer = entries.items.find(entry => entry.kind === "pi.assistant");
+  assert.ok(answer);
+  const fork = await f.request("conversation.fork", { conversationId: f.conversation.id, entryId: answer.id, requestId: randomUUID() });
+  assert.ok(fork.success);
+  const child = fork.result.conversation as { id: number };
+  const inherited = await f.request("conversation.context.usage", { conversationId: child.id });
+  assert.ok(inherited.success);
+  assert.equal(inherited.result.state, "reported");
+  const reset = await f.request("conversation.context.reset", { conversationId: f.conversation.id, requestId: randomUUID() });
+  assert.ok(reset.success);
+  const cleared = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(cleared.success);
+  assert.equal(cleared.result.state, "empty");
+  assert.equal(cleared.result.lastRequest, null);
+  const childAgain = await f.request("conversation.context.usage", { conversationId: child.id });
+  assert.ok(childAgain.success);
+  assert.deepEqual(childAgain.result, inherited.result);
+  const totals = await f.request("conversation.usage", { conversationId: f.conversation.id });
+  assert.ok(totals.success);
+  assert.ok(Array.isArray(totals.result.items));
+  assert.equal(totals.result.items[0].totalTokens, 17);
+  assert.equal(f.calls.length, 1);
+});
+
+test("missing latest usage is unreported instead of zero or an older request, and stopped responses stay excluded", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.enableUsage();
+  const first = await f.request("conversation.chat.submit", f.input());
+  assert.ok(first.success);
+  await f.settled(first.result.submissionId);
+  f.setMode("slow");
+  const stopped = await f.request("conversation.chat.submit", f.input("停止这轮"));
+  assert.ok(stopped.success);
+  await f.request("conversation.chat.abort", { conversationId: f.conversation.id });
+  await f.settled(stopped.result.submissionId);
+  const prior = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(prior.success);
+  assert.equal(prior.result.state, "reported");
+  f.disableUsage(); f.setMode("success");
+  const next = await f.request("conversation.chat.submit", f.input("不报告用量"));
+  assert.ok(next.success);
+  await f.settled(next.result.submissionId);
+  const unreported = await f.request("conversation.context.usage", { conversationId: f.conversation.id });
+  assert.ok(unreported.success);
+  assert.equal(unreported.result.state, "unreported");
+  assert.equal(unreported.result.lastRequest, null);
 });
 
 test("conversation usage reads native whole-history totals, remains isolated and survives reopen without auth or model calls", { timeout: 20_000 }, async (context) => {
