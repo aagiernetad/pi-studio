@@ -2,6 +2,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ChatMessage from "./ChatMessage";
+import StudioIcon from "./StudioIcon";
 
 type TranscriptEntry = {
   id: number;
@@ -64,6 +65,8 @@ export default function ConversationTranscript({
   const [nextCursor, setNextCursor] =
     useState<TranscriptCursor | null>(null);
 
+  const [outlineQuery, setOutlineQuery] = useState("");
+  const outline = useRef<HTMLDetailsElement>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -194,10 +197,49 @@ export default function ConversationTranscript({
     }
   }
 
+  const questions = [...entries].sort((a, b) => a.id - b.id)
+    .filter(entry => entry.kind === "studio.chat-input" || entry.kind === "pi.user")
+    .map((entry, index) => ({ id: entry.id, number: index + 1, text: modelText(entry.model) ?? formatContent(entry.data) }));
+  function jumpTo(id: number) {
+    const element = list.current?.querySelector<HTMLElement>('[data-entry-id="' + id + '"]');
+    if (!element || !list.current) return;
+    list.current.scrollTo({ top: list.current.scrollTop + element.getBoundingClientRect().top - list.current.getBoundingClientRect().top, behavior: "instant" });
+    element.focus({ preventScroll: true });
+    if (outline.current) outline.current.open = false;
+  }
+  useEffect(() => {
+    function jump(event: KeyboardEvent) {
+      if (!event.altKey || event.ctrlKey || event.metaKey || !["ArrowUp", "ArrowDown"].includes(event.key) || !list.current?.clientHeight) return;
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable], dialog[open]')) return;
+      const top = list.current.getBoundingClientRect().top;
+      const targets = questions.map(question => ({ id: question.id,
+        top: list.current?.querySelector('[data-entry-id="' + question.id + '"]')?.getBoundingClientRect().top ?? top }));
+      const earlier = targets.filter(item => item.top < top - 4);
+      const target = event.key === "ArrowUp" ? earlier[earlier.length - 1] : targets.find(item => item.top > top + 4);
+      if (target) { event.preventDefault(); jumpTo(target.id); }
+    }
+    window.addEventListener("keydown", jump);
+    return () => window.removeEventListener("keydown", jump);
+  });
+
   return (
     <div className="transcript-panel">
       <div className="transcript-heading">
-        <strong>对话消息</strong>
+        <strong className="sr-only">对话消息</strong>
+        <details className="conversation-outline" ref={outline} onKeyDown={event => { if (event.key === "Escape") event.currentTarget.open = false; }}>
+          <summary><StudioIcon name="outline" /><span>大纲</span></summary>
+          <div className="outline-content" aria-label="已加载对话大纲">
+            <input type="search" aria-label="搜索对话大纲" placeholder="搜索问题..." value={outlineQuery} onChange={event => setOutlineQuery(event.target.value)} />
+            <div className="outline-results">
+              {questions.filter(question => question.text.toLowerCase().includes(outlineQuery.toLowerCase().trim())).map(question =>
+                <button type="button" key={question.id} title={question.text} data-question-id={question.id} onClick={() => jumpTo(question.id)}>
+                  <span aria-hidden="true">{question.number}</span><span>{question.text}</span>
+                </button>)}
+              {!questions.length && <p className="muted">暂无已加载的问题。</p>}
+            </div>
+            {nextCursor !== null && <button type="button" disabled={loading || loadingMore} onClick={() => void loadMore()}>{loadingMore ? "加载中..." : "加载更早问题"}</button>}
+          </div>
+        </details>
 
         <button
           type="button"
@@ -208,7 +250,7 @@ export default function ConversationTranscript({
         >
           刷新历史
         </button>
-        <button type="button" onClick={() => { if (list.current) list.current.scrollTop = list.current.scrollHeight; }}>回到最新</button>
+        <button type="button" onClick={() => { const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches; list.current?.scrollTo({ top: list.current.scrollHeight, behavior: !reduced && document.documentElement.dataset.motion !== "off" && document.documentElement.dataset.scroll === "smooth" ? "smooth" : "instant" }); }}>回到最新</button>
       </div>
 
 
@@ -240,8 +282,7 @@ export default function ConversationTranscript({
         <p className="muted">正在读取历史记录...</p>
       ) : entries.length === 0 ? (
         <div className="conversation-placeholder">
-          开始新的对话
-          <p>选择模型，在下方输入第一条消息。</p>
+          <span className="conversation-greeting">有什么我可以帮你的？</span>
         </div>
       ) : (
         <div className="transcript-list" ref={list} role="region" aria-label="对话消息" tabIndex={0}>
@@ -250,6 +291,7 @@ export default function ConversationTranscript({
               className={`transcript-entry ${entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "message-user" : entry.kind === "pi.assistant" ? "message-assistant" : "message-boundary"}`}
               key={entry.id}
               data-entry-id={entry.id}
+              tabIndex={-1}
             >
               <div className="transcript-entry-header">
                 <strong>{entry.kind === "studio.chat-input" || entry.kind === "pi.user" ? "你" : entry.kind === "pi.assistant" ? "助手" : entry.kind === "pi.reset" ? "新上下文" : entry.kind}</strong>

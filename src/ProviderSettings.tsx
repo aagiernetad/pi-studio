@@ -138,7 +138,7 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
     <div className="provider-editor" aria-busy={loading || busy}>
       {notice && <p className="provider-notice" role="status">{notice}</p>}
       <section className="provider-step" aria-labelledby="credential-heading">
-      <h3 id="credential-heading">1. 保存访问凭据</h3>
+      <h3 id="credential-heading" className="sr-only">1. 保存访问凭据</h3>
       <div className="provider-status" role="status">
         {loading ? "正在读取服务商设置..." : credential ? (
           credential.stored ? `已保存${credential.type === "oauth" ? " OAuth 凭据" : " API Key"}` : "尚未保存 API Key"
@@ -163,16 +163,14 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
       {error && <div className="error" role="alert">{error}</div>}
       </section>
       <section className="provider-step" aria-labelledby="connection-heading">
-      <h3 id="connection-heading">2. 测试模型连接</h3>
-      <p className="muted">保存密钥后，选择模型并测试。凭据已保存不代表连接已经通过测试。</p>
+      <h3 id="connection-heading" className="sr-only">2. 测试模型连接</h3>
       <label className="provider-field">
-        <span>用于测试的模型</span>
+        <span>模型</span>
         <select aria-label="用于测试的模型" value={modelId} disabled={loading || busy || models.length === 0} onChange={(event) => { setModelId(event.target.value); setNotice(""); setTestError(""); }}>
           {models.length === 0 && <option value="">暂无可选模型</option>}
           {models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
         </select>
       </label>
-      {selected && <p className="muted">上下文 {selected.contextWindow.toLocaleString()} token · 最大输出 {selected.maxTokens.toLocaleString()} token</p>}
       {!loading && modelsError && <div className="error" role="alert">{modelsError}</div>}
       {!loading && !modelsError && models.length === 0 && <p className="provider-empty" role="status">该服务商暂无模型。可刷新状态，或在“自定义配置”中添加兼容服务商。</p>}
       <div className="provider-test-row">
@@ -215,8 +213,7 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
   const provider = providers.find((item) => item.id === providerId);
   return (
     <section className="panel provider-settings" aria-labelledby="provider-heading">
-      <h3 id="provider-heading">服务商设置</h3>
-        <p className="muted">管理服务商密钥并检查模型连接。</p>
+      <h3 id="provider-heading" className="sr-only">服务商设置</h3>
         <div className="provider-actions provider-mode-picker" role="group" aria-label="设置操作">
           <button type="button" disabled={busy} aria-pressed={!managing} onClick={() => setManaging(false)}>密钥与连接</button>
           <button type="button" disabled={busy} aria-pressed={managing} onClick={() => { setManaging(true); setConfigNotice(""); }}>自定义配置</button>
@@ -246,7 +243,7 @@ export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (bus
           setProviderId(id ?? "deepseek");
           setRevision((value) => value + 1);
           setManaging(false);
-          setConfigNotice(id ? "配置已保存，可设置 API Key 并测试连接。" : "配置已删除，系统凭据保持不变。");
+          setConfigNotice(id ? "配置已保存。" : "配置已删除，系统凭据保持不变。");
         }} />}
     </section>
   );

@@ -1,15 +1,20 @@
+import StudioIcon from "./StudioIcon";
+import ConversationModelPicker from "./ConversationModelPicker";
+import ConversationContextUsage from "./ConversationContextUsage";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { thinkingLabels, type ThinkingLevel } from "./thinking";
 
 type Provider = { id: string; name: string };
-type Model = { id: string; name: string; api: string };
+type Model = { id: string; name: string; api: string; contextWindow?: number; maxTokens?: number; thinkingLevels?: ThinkingLevel[] };
 type Status = {
   running: boolean; latestEntryId: number | null; partialText: string;
   model: { providerId: string; modelId: string } | null; failureReason: string | null;
   canResume: boolean;
   contextReset: boolean;
+  thinkingLevel?: ThinkingLevel;
 };
-type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string };
+type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string; thinkingLevel?: ThinkingLevel };
 export type ConversationDraft = { content: string; input: Input | null };
 export type DraftUpdate =
   | { type: "edit"; content: string }
@@ -22,6 +27,7 @@ function message(cause: unknown): string {
     INVALID_PARAMS: "消息或模型参数无效。", MODEL_NOT_FOUND: "模型已不可用，请重新选择。",
     PROVIDER_NOT_CONFIGURED: "请先在服务商设置中保存 API Key。",
     CHAT_UNSUPPORTED: "当前仅支持所列文本接口的 API Key 认证。",
+    THINKING_LEVEL_UNSUPPORTED: "模型的推理档位已变化，请刷新模型目录后重新选择。",
     CONVERSATION_BUSY: "该会话正在生成，请等待或停止后再发送。",
     CONVERSATION_NOT_FOUND: "当前会话不可用，请刷新会话列表。",
     REQUEST_ID_CONFLICT: "请求标识与原消息不一致，请刷新后检查历史。",
@@ -30,7 +36,7 @@ function message(cause: unknown): string {
   };
   return (code && messages[code]) || "提交结果尚未确认，可重试同一请求，不会重复发送。";
 }
-const rejected = (cause: unknown) => typeof cause === "string" && /^(INVALID_PARAMS|MODEL_NOT_FOUND|PROVIDER_NOT_CONFIGURED|CHAT_UNSUPPORTED|CONVERSATION_BUSY|CONVERSATION_NOT_FOUND|REQUEST_ID_CONFLICT|CHAT_NOT_RESUMABLE|CREDENTIAL_STORE_UNAVAILABLE):/.test(cause);
+const rejected = (cause: unknown) => typeof cause === "string" && /^(INVALID_PARAMS|MODEL_NOT_FOUND|PROVIDER_NOT_CONFIGURED|CHAT_UNSUPPORTED|THINKING_LEVEL_UNSUPPORTED|CONVERSATION_BUSY|CONVERSATION_NOT_FOUND|REQUEST_ID_CONFLICT|CHAT_NOT_RESUMABLE|CREDENTIAL_STORE_UNAVAILABLE):/.test(cause);
 
 export default function ConversationChat({ conversationId, onEntriesChanged, catalogRevision = 0, draft, onDraftUpdate }: {
   conversationId: number; onEntriesChanged: () => void; catalogRevision?: number;
@@ -40,6 +46,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const [providerId, setProviderId] = useState("");
   const [models, setModels] = useState<Model[]>([]);
   const [modelId, setModelId] = useState("");
+  const [thinkingChoice, setThinkingChoice] = useState<{ providerId: string; modelId: string; level: ThinkingLevel } | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState("");
@@ -111,6 +118,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         setStatusError("");
         if (first) {
           savedModel.current = next.model;
+          if (next.model) setThinkingChoice({ ...next.model, level: next.thinkingLevel ?? "off" });
           if (next.model && availableProviders.current.some((item) => item.id === next.model?.providerId)) { setProviderId(next.model.providerId); setModelId(next.model.modelId); }
           first = false;
         }
@@ -128,7 +136,8 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
 
   async function send() {
     if (working.current || !status || status.running || modelsLoading || confirmReset || hasPendingReset) return;
-    if (!pending.current) pending.current = { conversationId, requestId: crypto.randomUUID(), providerId, modelId, content: content.trim() };
+    if (!pending.current) pending.current = { conversationId, requestId: crypto.randomUUID(), providerId, modelId, content: content.trim(),
+      ...(thinkingLevel !== "off" ? { thinkingLevel } : {}) };
     const input = pending.current;
     if (!input.content) return;
     onDraftUpdate({ type: "pending", content, input });
@@ -215,27 +224,14 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
     } finally { working.current = false; if (mounted.current) setAction(null); }
   }
   const selected = models.find((item) => item.id === modelId);
+  const thinkingLevels = selected?.thinkingLevels?.length ? selected.thinkingLevels : ["off" as const];
+  const thinkingLevel = thinkingChoice?.providerId === providerId && thinkingChoice.modelId === modelId && thinkingLevels.includes(thinkingChoice.level)
+    ? thinkingChoice.level : thinkingLevels[0];
   const disabled = !status || status.running || action !== null || hasPending || hasPendingResume || confirmReset || hasPendingReset;
   return (
     <div className="chat-panel" aria-label="模型对话">
-      <div className="transcript-heading"><strong>消息输入</strong>
-        <button type="button" disabled={disabled} onClick={() => setRevision((value) => value + 1)}>刷新模型目录</button>
-      </div>
-      <div className="chat-model-selectors">
-      <label className="provider-field"><span>对话服务商</span>
-        <select aria-label="对话服务商" value={providerId} disabled={disabled || providers.length === 0} onChange={(event) => setProviderId(event.target.value)}>
-          {providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
-      </label>
-      <label className="provider-field"><span>对话模型</span>
-        <select aria-label="对话模型" value={modelId} disabled={disabled || modelsLoading} onChange={(event) => setModelId(event.target.value)}>
-          <option value="">请选择可用模型</option>
-          {models.map((item) => <option key={item.id} value={item.id} disabled={!supported(item.api)}>{item.name}{supported(item.api) ? "" : "（暂不支持）"}</option>)}
-        </select>
-      </label>
-      </div>
       <textarea aria-label="消息内容" value={content} maxLength={8000} rows={3} disabled={disabled}
-        placeholder="输入消息，Ctrl / ⌘ + Enter 发送" onKeyDown={(event) => {
+        placeholder="输入消息..." title="Ctrl / ⌘ + Enter 发送，Enter 换行" aria-describedby="chat-shortcut" onKeyDown={(event) => {
           if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey) || event.nativeEvent.isComposing) return;
           event.preventDefault();
           if (!event.repeat && !event.currentTarget.disabled && !modelsLoading && content.trim() && selected && supported(selected.api)) void send();
@@ -243,16 +239,22 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           setContent(event.target.value);
           onDraftUpdate({ type: "edit", content: event.target.value });
         }} />
-      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。</p>
-      <div className="provider-actions">
+      <p id="chat-shortcut" className="muted chat-shortcut sr-only">Ctrl / ⌘ + Enter 发送，Enter 换行。</p>
+      <div className="provider-actions composer-actions">
+        <ConversationModelPicker providers={providers} models={models} providerId={providerId} modelId={modelId}
+          thinkingLevels={thinkingLevels} thinkingLevel={thinkingLevel} onThinking={level => setThinkingChoice({ providerId, modelId, level })}
+          disabled={disabled} loading={modelsLoading} supported={supported}
+          onProvider={setProviderId} onModel={setModelId} onRefresh={() => setRevision(value => value + 1)} />
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
-          {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}
+          {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}<StudioIcon name="send" />
         </button>
         <button type="button" disabled={!status?.running || action !== null} onClick={() => void stop()}>{action === "stop" ? "正在停止..." : "停止生成"}</button>
         {(status?.canResume || hasPendingResume) && <button type="button" disabled={!status || status.running || action !== null || hasPending || confirmReset || hasPendingReset} onClick={() => void resume()}>
           {action === "resume" ? "正在继续..." : hasPendingResume ? "重试同一继续请求" : "继续上次生成"}
         </button>}
         <button type="button" disabled={disabled} onClick={() => { setError(""); setConfirmReset(true); }}>开始新上下文</button>
+        {status && <ConversationContextUsage conversationId={conversationId} latestEntryId={status.latestEntryId} contextReset={status.contextReset}
+          catalogRevision={catalogRevision} disabled={disabled} onReset={() => { setError(""); setConfirmReset(true); }} />}
       </div>
       {confirmReset && <div className="result" role="group" aria-label="确认开始新上下文">
         <p>后续模型请求将不再携带此前对话。旧消息、会话、模型选择和累计用量会保留，未发送的草稿也会保留。重置本身不调用模型。</p>
@@ -264,7 +266,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         </div>
       </div>}
       {status?.contextReset && <p className="provider-notice" role="status">已开始新上下文。此前消息仍可在历史中查看。</p>}
-      {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
+      {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}{status?.thinkingLevel && status.thinkingLevel !== "off" ? `及推理强度“${thinkingLabels[status.thinkingLevel]}”` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
       <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>
 </div></details>

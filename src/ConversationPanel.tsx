@@ -5,6 +5,7 @@ import ConversationTranscript from "./ConversationTranscript";
 import ConversationChat, { type ConversationDraft, type DraftUpdate } from "./ConversationChat";
 import ConversationTitleEditor from "./ConversationTitleEditor";
 import ConversationUsage from "./ConversationUsage";
+import StudioIcon from "./StudioIcon";
 
 type UserConversation = {
   id: number;
@@ -24,7 +25,7 @@ type ConversationCreateResult = {
 
 const PAGE_SIZE = 20;
 
-export default function ConversationPanel({ catalogRevision = 0, onOpenProviders }: { catalogRevision?: number; onOpenProviders: () => void }) {
+export default function ConversationPanel({ catalogRevision = 0, onOpenProviders, onOpenAppearance }: { catalogRevision?: number; onOpenProviders: () => void; onOpenAppearance: () => void }) {
   // 仅保存在当前工作台内存中，不写入浏览器存储、Transcript 或 SQLite。
   const drafts = useRef(new Map<number, ConversationDraft>());
   function updateDraft(id: number, update: DraftUpdate) {
@@ -49,6 +50,7 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
     null,
   );
   const [listOpen, setListOpen] = useState(false);
+  const naming = useRef<HTMLDetailsElement>(null);
   const [title, setTitle] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
@@ -149,6 +151,7 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
       setSelectedId(created.id);
       setListOpen(false);
       setTitle("");
+      if (naming.current) naming.current.open = false;
       setSearchDraft("");
       setQuery("");
       pendingCreate.current = null;
@@ -223,7 +226,9 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
       </div>
 
       <div className="conversation-create">
-        <input
+        <details className="conversation-naming" ref={naming} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}>
+          <summary aria-label="设置新会话标题" title="设置新会话标题"><StudioIcon name="edit" /></summary>
+          <div>        <input
           aria-label="会话标题"
           value={title}
           maxLength={120}
@@ -231,6 +236,8 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
           placeholder="会话标题（可选）"
           onChange={(event) => setTitle(event.target.value)}
         />
+          </div>
+        </details>
 
         <button
           type="button"
@@ -253,10 +260,10 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
       }}>
         <input aria-label="搜索会话标题" placeholder="按标题搜索全部会话" value={searchDraft} maxLength={120}
           disabled={creating || renaming} onChange={(event) => setSearchDraft(event.target.value)} />
-        <button type="submit" disabled={creating || renaming}>搜索</button>
-        <button type="button" disabled={creating || renaming || (!searchDraft && !query)} onClick={() => {
+        <button type="submit" aria-label="搜索" title="搜索" disabled={creating || renaming}><StudioIcon name="search" /></button>
+        <button type="button" aria-label="清除搜索" title="清除搜索" disabled={creating || renaming || (!searchDraft && !query)} onClick={() => {
           setSearchDraft(""); setQuery(""); setError(""); setNotice("");
-        }}>清除搜索</button>
+        }}>×</button>
       </form>
       {notice && <p className="provider-notice" role="status">{notice}</p>}
 
@@ -273,6 +280,8 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
                 <button
                   key={conversation.id}
                   data-conversation-id={conversation.id}
+                  title={conversation.title}
+                  aria-label={conversation.title + " #" + conversation.id}
                   type="button"
                   aria-pressed={selectedId === conversation.id}
                   className={
@@ -283,12 +292,6 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
                   onClick={() => { setSelectedId(conversation.id); setListOpen(false); }}
                 >
                   <strong>{conversation.title}</strong>
-                  <span>
-                    #{conversation.id} ·{" "}
-                    {new Date(
-                      conversation.createdAt,
-                    ).toLocaleString("zh-CN")}
-                  </span>
                 </button>
               ))}
             </div>
@@ -305,6 +308,7 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
             </button>
           )}
 
+          <div className="sidebar-footer"><button type="button" onClick={onOpenAppearance}><StudioIcon name="appearance" />外观与偏好</button></div>
         </aside>
         <div className="conversation-detail">
           <button type="button" className="conversation-drawer-toggle" aria-expanded={listOpen} onClick={() => setListOpen(true)}>☰ 会话列表</button>
@@ -369,12 +373,10 @@ export default function ConversationPanel({ catalogRevision = 0, onOpenProviders
           </> : <div className="workspace-empty">
             <span className="empty-symbol" aria-hidden="true">π</span>
             <h3>从一个想法开始</h3>
-            <p>新建会话，与模型一起梳理问题、编写代码或规划任务。</p>
             <div className="provider-actions">
               <button type="button" className="primary" disabled={creating || loading || renaming} onClick={() => void createConversation()}>新建会话</button>
               <button type="button" onClick={onOpenProviders}>配置服务商</button>
             </div>
-            <span className="muted">会话与历史保存在本机。</span>
           </div>}
         </div>
       </div>

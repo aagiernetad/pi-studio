@@ -1,9 +1,12 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConversationPanel from "./ConversationPanel";
 import ProviderSettings from "./ProviderSettings";
+import StudioIcon from "./StudioIcon";
+import AppearanceSettings from "./AppearanceSettings";
+import { APPEARANCE_KEY, loadAppearance, type Appearance, type ThemeMode } from "./appearance";
 import "./App.css";
 import "./workspace.css";
 
@@ -31,9 +34,69 @@ interface RuntimeEvent {
 
 type RuntimeStatus = "checking" | "online" | "offline";
 
-type StudioPage = "conversations" | "providers" | "diagnostics";
+type StudioPage = "conversations" | "providers" | "appearance" | "diagnostics";
+
+type Theme = "light" | "dark";
+const THEME_KEY = "pi-studio.theme";
+
+function savedTheme(): Theme | null {
+  try {
+    const value = localStorage.getItem(THEME_KEY);
+    return value === "light" || value === "dark" ? value : null;
+  } catch { return null; }
+}
 
 function App() {
+  const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
+  const [themePreference, setThemePreference] = useState<Theme | null>(savedTheme);
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const theme = themePreference ?? (systemDark ? "dark" : "light");
+  useLayoutEffect(() => {
+    Object.assign(document.documentElement.dataset, {
+      theme, palette: theme === "dark" ? appearance.darkPalette : appearance.lightPalette,
+      accent: appearance.accent, corners: appearance.corners, codeFont: appearance.codeFont,
+      density: appearance.density, motion: appearance.motion, ambient: appearance.ambient,
+      readingWidth: appearance.width, ligatures: String(appearance.ligatures), scroll: appearance.scroll,
+    });
+  }, [theme, appearance]);
+  function updateAppearance(next: Appearance) {
+    setAppearance(next);
+    try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next)); } catch { /* 本次外观仍有效。 */ }
+  }
+  function updateMode(mode: ThemeMode) {
+    setThemePreference(mode === "system" ? null : mode);
+    try {
+      if (mode === "system") localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, mode);
+    } catch { /* 本次选择仍有效。 */ }
+  }
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemDark(media.matches);
+    media.addEventListener("change", update);
+    update();
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    const update = () => { document.documentElement.dataset.motionPaused = String(document.hidden || !document.hasFocus()); };
+    const pause = () => { document.documentElement.dataset.motionPaused = "true"; };
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", pause);
+    document.addEventListener("visibilitychange", update);
+    update();
+    return () => {
+      window.removeEventListener("focus", update); window.removeEventListener("blur", pause);
+      document.removeEventListener("visibilitychange", update);
+      delete document.documentElement.dataset.motionPaused;
+    };
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    updateMode(next);
+  }
+
   const [page, setPage] = useState<StudioPage>("conversations");
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
@@ -163,26 +226,35 @@ function App() {
         {([
           ["conversations", "会话", "studio-conversations"],
           ["providers", "服务商", "studio-providers"],
+          ["appearance", "外观", "studio-appearance"],
           ["diagnostics", "诊断", "studio-diagnostics"],
         ] as const).map(([key, label, target]) => <button key={key} type="button"
-          aria-current={page === key ? "page" : undefined} aria-controls={target}
-          disabled={settingsBusy} onClick={() => navigate(key)}>{label}</button>)}
+          title={label} aria-current={page === key ? "page" : undefined} aria-controls={target}
+          disabled={settingsBusy} onClick={() => navigate(key)}><StudioIcon name={key} /><span>{label}</span></button>)}
       </nav>
+      <button type="button" className="theme-toggle" onClick={toggleTheme}
+        aria-label={theme === "dark" ? "切换至浅色模式" : "切换至深色模式"}
+        title={theme === "dark" ? "浅色模式" : "深色模式"}>
+        <StudioIcon name={theme === "dark" ? "sun" : "moon"} />
+      </button>
       </div>
 
       <section id="studio-conversations" aria-labelledby="conversations-heading" hidden={page !== "conversations"}>
         <h2 id="conversations-heading" className="sr-only">会话工作台</h2>
-        <ConversationPanel catalogRevision={catalogRevision} onOpenProviders={() => navigate("providers")} />
+        <ConversationPanel catalogRevision={catalogRevision} onOpenProviders={() => navigate("providers")} onOpenAppearance={() => navigate("appearance")} />
       </section>
       <section id="studio-providers" aria-labelledby="providers-heading" hidden={page !== "providers"}>
-        <div className="workspace-heading"><h2 id="providers-heading">服务商与模型</h2>
-          <p className="muted">配置模型服务商、管理凭据并测试连接。</p></div>
+        <div className="workspace-heading"><h2 id="providers-heading">服务商与模型</h2></div>
         {page === "providers" && <ProviderSettings onBusyChange={setSettingsBusy} />}
         {settingsBusy && <p className="muted" role="status">正在处理服务商操作，完成后可切换页面。</p>}
       </section>
+      <section id="studio-appearance" aria-labelledby="appearance-heading" hidden={page !== "appearance"}>
+        <div className="workspace-heading"><h2 id="appearance-heading">外观</h2></div>
+        {page === "appearance" && <AppearanceSettings value={appearance} mode={themePreference ?? "system"} theme={theme}
+          onChange={updateAppearance} onModeChange={updateMode} />}
+      </section>
       <section id="studio-diagnostics" aria-labelledby="diagnostics-heading" hidden={page !== "diagnostics"}>
-        <div className="workspace-heading"><h2 id="diagnostics-heading">运行诊断</h2>
-          <p className="muted">检查运行时连接、通信与最近事件。</p></div>
+        <div className="workspace-heading"><h2 id="diagnostics-heading">运行诊断</h2></div>
 
       <section className="panel">
         <div className="section-heading">
@@ -285,9 +357,6 @@ function App() {
 
       </section>
 
-      <footer>
-        Pi Studio · 本地工作空间
-      </footer>
     </main>
   );
 }

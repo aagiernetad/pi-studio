@@ -13,7 +13,7 @@ before(async () => {
 after(async () => { await browser?.close(); await server?.close(); });
 
 async function fixture(run, withChat = false) {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ colorScheme: "dark" });
   try {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
@@ -68,6 +68,13 @@ async function fixture(run, withChat = false) {
             if (state.failRenameOnce) { state.failRenameOnce = false; throw 'IPC_TIMEOUT: synthetic-rename-private'; }
             return { conversation: structuredClone(item) };
           }
+          if (command === "conversation_context_usage") {
+            const result = structuredClone(state.contextUsages?.[args.conversationId] ?? { conversationId: args.conversationId, latestEntryId: chatStatus(args.conversationId).latestEntryId, state: 'empty', lastRequest: null });
+            state.contextUsageArgs ??= []; state.contextUsageArgs.push(args.conversationId);
+            if (state.failContextUsage) throw 'IPC_TIMEOUT: synthetic-context-private';
+            if (state.holdContextUsageFor === args.conversationId) return new Promise(resolve => { state.releaseContextUsage = () => resolve(result); });
+            return result;
+          }
           if (command === "conversation_usage") {
             const all = (state.usages[args.conversationId] ?? []).filter(item => !args.afterModel || item.model > args.afterModel);
             const items = structuredClone(all.slice(0, args.limit ?? 20));
@@ -101,6 +108,8 @@ async function fixture(run, withChat = false) {
             state.submissions[input.requestId] = id;
             const current = chatStatus(input.conversationId);
             current.model = { providerId: input.providerId, modelId: input.modelId };
+            current.thinkingLevel = input.thinkingLevel ?? "off";
+            if (state.nextContextUsage) { state.contextUsages ??= {}; state.contextUsages[input.conversationId] = { ...structuredClone(state.nextContextUsage), conversationId: input.conversationId, latestEntryId: id * 2 }; }
             current.running = !!state.slowChat;
             current.canResume = false;
             current.contextReset = false;
@@ -138,6 +147,7 @@ async function fixture(run, withChat = false) {
             const id = Object.keys(state.submissions).length + 1;
             state.submissions[input.requestId] = id;
             Object.assign(current, { contextReset: true, canResume: false, failureReason: null, latestEntryId: 200 + id });
+            state.contextUsages ??= {}; state.contextUsages[input.conversationId] = { conversationId: input.conversationId, latestEntryId: 200 + id, state: "empty", lastRequest: null };
             state.entries[input.conversationId].unshift({ id: 200 + id, kind: 'pi.reset', data: null, model: null });
             if (state.failResetOnce) { state.failResetOnce = false; throw 'IPC_TIMEOUT: synthetic-reset-private'; }
             return { submissionId: id, entryId: 200 + id };
@@ -163,6 +173,7 @@ async function fixture(run, withChat = false) {
             if (state.failModelsFor === args.providerId) throw "IPC_TIMEOUT: synthetic-model-private";
             if (state.emptyModelsFor === args.providerId) return { items: [] };
             if (args.providerId === "deepseek" && state.delay) await new Promise(r => setTimeout(r, state.delay));
+            if (state.modelsByProvider?.[args.providerId]) return { items: structuredClone(state.modelsByProvider[args.providerId]) };
             return { items: [{ id: state.configs[args.providerId]?.modelId ?? args.providerId + "-model", name: args.providerId, api: "openai-completions", contextWindow: 64000, maxTokens: 4096, supportsConnectionTest: args.providerId !== "oauth" }] };
           }
           const status = () => ({ providerId: args.providerId, stored: !!state.stored[args.providerId], type: state.stored[args.providerId] ? "api_key" : null });
@@ -251,8 +262,8 @@ test("保存期间阻止切换和重复提交，完成后恢复操作", async ()
   assert.equal(await panel.getByLabel("服务商", { exact: true }).isDisabled(), true);
   assert.equal(await panel.getByRole("button", { name: "正在保存...", exact: true }).isDisabled(), true);
   assert.equal(await panel.getByLabel("API Key", { exact: true }).inputValue(), "");
-  await page.getByText("服务商设置", { exact: true }).click();
-  await page.getByText("服务商设置", { exact: true }).click();
+  assert.equal(await panel.getByRole("button", { name: "自定义配置", exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "会话", exact: true }).isDisabled(), true);
   assert.equal(await panel.getByRole("button", { name: "正在保存...", exact: true }).isDisabled(), true);
   await page.evaluate(() => window.fixture.releaseSave());
   await panel.getByText("API Key 已保存到 Windows 凭据管理器。", { exact: true }).waitFor();
@@ -711,7 +722,7 @@ test("返回会话刷新模型目录，页面切换保留生成与未确认消�
   await page.getByLabel('API 基础地址', { exact: true }).fill('https://model.example.test/v1');
   await page.getByLabel('模型 ID', { exact: true }).fill('new-model');
   await page.getByRole('button', { name: '保存配置', exact: true }).click();
-  await page.getByText('配置已保存，可设置 API Key 并测试连接。', { exact: true }).waitFor();
+  await page.getByText('配置已保存。', { exact: true }).waitFor();
   await nav.getByRole('button', { name: '会话', exact: true }).click();
   await page.waitForFunction(() => !!document.querySelector('[aria-label="对话服务商"] option[value="custom-navigation"]'));
   assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '保留目录刷新草稿');
@@ -819,7 +830,7 @@ test("服务商读取失败可重试，空目录提供自定义配置入口且�
   await page.evaluate(() => { window.fixture.failProviderList = false; window.fixture.emptyProviderList = true; });
   await panel.getByRole('button', { name: '重试读取服务商', exact: true }).click();
   await panel.getByRole('button', { name: '添加自定义服务商', exact: true }).click();
-  await panel.getByText('尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。', { exact: true }).waitFor();
+  await panel.getByText('暂无自定义服务商。', { exact: true }).waitFor();
   assert.equal(await panel.getByLabel('配置标识', { exact: true }).isEnabled(), true);
 }));
 
@@ -865,13 +876,13 @@ test("自定义配置读取失败可恢复，重试后表单可保存并进入�
   assert.equal((await panel.innerText()).includes('synthetic-config-private'), false);
   await page.evaluate(() => { window.fixture.failConfigList = false; });
   await panel.getByRole('button', { name: '重试读取配置', exact: true }).click();
-  await panel.getByText('尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。', { exact: true }).waitFor();
+  await panel.getByText('暂无自定义服务商。', { exact: true }).waitFor();
   await panel.getByLabel('配置标识', { exact: true }).fill('custom-recovered');
   await panel.getByLabel('显示名称', { exact: true }).fill('重试恢复的服务商');
   await panel.getByLabel('API 基础地址', { exact: true }).fill('https://model.example.test/v1');
   await panel.getByLabel('模型 ID', { exact: true }).fill('recovered-model');
   await panel.getByRole('button', { name: '保存配置', exact: true }).click();
-  await panel.getByText('配置已保存，可设置 API Key 并测试连接。', { exact: true }).waitFor();
+  await panel.getByText('配置已保存。', { exact: true }).waitFor();
   assert.equal(await panel.getByLabel('服务商', { exact: true }).inputValue(), 'custom-recovered');
   await panel.getByRole('heading', { name: '1. 保存访问凭据', exact: true }).waitFor();
   await panel.getByRole('heading', { name: '2. 测试模型连接', exact: true }).waitFor();
@@ -1030,10 +1041,669 @@ test("历史服务商已删除时恢复有效目录，目录先后返回均不�
 test("切换至有效模型目录后清除旧模型错误且保留输入", async () => fixture(async (page) => {
   await page.getByLabel('消息内容',{exact:true}).fill('恢复模型目录后仍保留');
   await page.evaluate(()=>{window.fixture.failModelsFor='deepseek';});
+  await page.getByRole('button',{name:'选择模型',exact:true}).click();
   await page.getByRole('button',{name:'刷新模型目录',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'模型目录读取失败'}).waitFor();
+  await page.getByRole('button',{name:'选择模型',exact:true}).click();
   await page.getByLabel('对话服务商',{exact:true}).selectOption('other');
   await page.waitForFunction(()=>document.querySelector('[aria-label="对话模型"]').value==='other-model');
+  await page.getByRole('button',{name:'关闭模型菜单',exact:true}).click();
   assert.equal(await page.getByRole('alert').filter({hasText:'模型目录读取失败'}).count(),0);
   assert.equal(await page.getByLabel('消息内容',{exact:true}).inputValue(),'恢复模型目录后仍保留');
 },true));
+
+
+test("黑曜视觉保留可读对比、键盘焦点和减少动态效果，设置页在窄窗可操作", async () => fixture(async (page, panel) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const nav = page.getByRole("navigation", { name: "工作区导航" });
+  const chat = nav.getByRole("button", { name: "会话", exact: true });
+  await chat.click();
+  await page.getByLabel("消息内容", { exact: true }).focus();
+  const accessibility = await page.getByLabel("消息内容", { exact: true }).evaluate(element => {
+    const style = getComputedStyle(element);
+    const rgb = color => color.match(/[\d.]+/g).slice(0, 3).map(Number);
+    const luminance = color => rgb(color).map(value => {
+      const channel = value / 255;
+      return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+    }).reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+    // Conservative comparison with the lighter end of the input card gradient.
+    const background = luminance("rgb(32, 32, 39)");
+    const contrast = color => (luminance(color) + .05) / (background + .05);
+    return { text: contrast(style.color), placeholder: contrast(getComputedStyle(element, "::placeholder").color),
+      outline: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
+      transition: getComputedStyle(element.closest(".chat-panel")).transitionDuration };
+  });
+  assert.ok(accessibility.text >= 4.5);
+  assert.ok(accessibility.placeholder >= 4.5);
+  assert.equal(accessibility.outline, "solid");
+  assert.ok(accessibility.outlineWidth >= 2);
+  assert.equal(accessibility.transition, "0s");
+  // Decorative icons must not change the navigation's accessible names.
+  assert.equal(await chat.getAttribute("aria-current"), "page");
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await nav.getByRole("button", { name: "服务商", exact: true }).click();
+    for (const mode of ["密钥与连接", "自定义配置"]) {
+      await panel.getByRole("button", { name: mode, exact: true }).click();
+      assert.equal(await panel.getByRole("button", { name: mode, exact: true }).getAttribute("aria-pressed"), "true");
+      const geometry = await panel.evaluate(element => ({
+        pageWidth: document.documentElement.scrollWidth,
+        viewportWidth: innerWidth,
+        fieldsInside: [...element.querySelectorAll("input, select")].every(field => {
+          const box = field.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth;
+        }),
+      }));
+      assert.ok(geometry.pageWidth <= geometry.viewportWidth);
+      assert.ok(geometry.fieldsInside);
+    }
+  }
+}, true));
+
+
+test("主题首次跟随系统，手动切换保留草稿且重开后记住选择", async () => fixture(async page => {
+  const theme = () => page.locator("html").getAttribute("data-theme");
+  assert.equal(await theme(), "dark");
+  assert.equal(await page.evaluate(() => localStorage.length), 0);
+  await page.getByLabel("消息内容", { exact: true }).fill("明暗切换仍保留的草稿");
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === "light");
+  assert.equal(await page.evaluate(() => localStorage.length), 0);
+  await page.getByRole("button", { name: "切换至深色模式", exact: true }).click();
+  assert.equal(await theme(), "dark");
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "明暗切换仍保留的草稿");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.emulateMedia({ colorScheme: "light" });
+  assert.equal(await theme(), "dark");
+  await page.reload();
+  await page.getByRole("button", { name: "切换至浅色模式", exact: true }).waitFor();
+  assert.equal(await theme(), "dark");
+  await page.getByRole("button", { name: "切换至浅色模式", exact: true }).click();
+  await page.reload();
+  await page.getByRole("button", { name: "切换至深色模式", exact: true }).waitFor();
+  assert.equal(await theme(), "light");
+  assert.deepEqual(await page.evaluate(() => [Object.keys(localStorage), localStorage.getItem("pi-studio.theme"), sessionStorage.length]), [["pi-studio.theme"], "light", 0]);
+}, true));
+
+test("浅色模式下消息代码与设置保持可读，窄窗导航和发送可用", async () => fixture(async (page, panel) => {
+  await page.getByRole("button", { name: "切换至浅色模式", exact: true }).click();
+  await page.evaluate(() => {
+    fixture.entries[1] = [{ id: 2, kind: "pi.assistant", data: null, model: [{ role: "assistant", content: [{ type: "text", text: "浅色阅读验证\n\n~~~ts\nconst theme = 'light';\n~~~" }], stopReason: "stop" }] }];
+    fixture.stored.deepseek = true;
+  });
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  await page.locator(".message-code pre code").waitFor();
+  const codeContrast = await page.locator(".message-code pre code").evaluate(element => {
+    const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number).map(value => {
+      const channel = value / 255;
+      return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+    }).reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+    const text = luminance(getComputedStyle(element).color);
+    const background = luminance(getComputedStyle(element.closest(".message-code")).backgroundColor);
+    return (Math.max(text, background) + .05) / (Math.min(text, background) + .05);
+  });
+  assert.ok(codeContrast >= 4.5);
+  const nav = page.getByRole("navigation", { name: "工作区导航" });
+  for (const width of [1280, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const controls = await page.evaluate(() => {
+      const theme = document.querySelector(".theme-toggle").getBoundingClientRect();
+      const send = [...document.querySelectorAll("button")].find(button => button.textContent.includes("发送消息")).getBoundingClientRect();
+      return { fits: theme.left >= 0 && theme.right <= innerWidth && send.right <= innerWidth && send.bottom <= innerHeight,
+        pageFits: document.documentElement.scrollWidth <= innerWidth };
+    });
+    assert.ok(controls.fits && controls.pageFits);
+    await nav.getByRole("button", { name: "服务商", exact: true }).click();
+    await panel.getByLabel("API Key", { exact: true }).waitFor();
+    assert.equal(await panel.getByLabel("API Key", { exact: true }).getAttribute("type"), "password");
+    assert.ok(await panel.evaluate(element => [...element.querySelectorAll("input, select")].every(field => field.getBoundingClientRect().right <= innerWidth)));
+    await nav.getByRole("button", { name: "会话", exact: true }).click();
+  }
+  await nav.getByRole("button", { name: "服务商", exact: true }).click();
+  await panel.getByLabel("API Key", { exact: true }).fill("synthetic-theme-key");
+  await page.getByRole("button", { name: "切换至深色模式", exact: true }).click();
+  assert.equal(await panel.getByLabel("API Key", { exact: true }).inputValue(), "synthetic-theme-key");
+  assert.equal(await page.evaluate(() => Object.values(localStorage).includes("synthetic-theme-key")), false);
+}, true));
+
+test("主题偏好无法读取或保存时仍可切换界面", async () => fixture(async page => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Storage.prototype, "getItem", { value() { throw new Error("blocked"); } });
+    Object.defineProperty(Storage.prototype, "setItem", { value() { throw new Error("blocked"); } });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "切换至浅色模式", exact: true }).click();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+  await page.getByLabel("消息内容", { exact: true }).fill("仍能输入");
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "仍能输入");
+}, true));
+
+
+test("四套主题与阅读外观即时生效，重新打开恢复选择", async () => fixture(async page => {
+  const nav = page.getByRole("navigation", { name: "工作区导航" });
+  await nav.getByRole("button", { name: "外观", exact: true }).click();
+  for (const [name, palette, theme] of [
+    ["暖炭玄岩", "warm", "dark"], ["暖白画册", "alabaster", "light"],
+    ["白昼冷晶", "crystal", "light"], ["深空黑曜", "obsidian", "dark"],
+  ]) {
+    await page.getByRole("button", { name, exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.palette, document.documentElement.dataset.theme]), [palette, theme]);
+    assert.equal(await page.getByRole("button", { name, exact: true }).getAttribute("aria-pressed"), "true");
+  }
+  await page.getByLabel("强调色", { exact: true }).selectOption("iris");
+  await page.getByLabel("圆角", { exact: true }).selectOption("soft");
+  await page.getByLabel("代码字体", { exact: true }).selectOption("cascadia");
+  await page.getByLabel("代码连字", { exact: true }).check();
+  await page.getByLabel("阅读宽度", { exact: true }).selectOption("wide");
+  await page.getByLabel("侧栏密度", { exact: true }).selectOption("compact");
+  await page.reload();
+  assert.deepEqual(await page.evaluate(() => {
+    const d = document.documentElement.dataset;
+    return [d.palette, d.accent, d.corners, d.codeFont, d.ligatures, d.readingWidth, d.density];
+  }), ["obsidian", "iris", "soft", "cascadia", "true", "wide", "compact"]);
+  await nav.getByRole("button", { name: "外观", exact: true }).click();
+  await page.getByRole("button", { name: "静默省电", exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.motion, document.documentElement.dataset.ambient, getComputedStyle(document.querySelector(".theme-toggle")).transitionDuration]), ["off", "off", "0s"]);
+  await page.getByRole("button", { name: "恢复默认", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "跟随系统", exact: true }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.getByLabel("强调色", { exact: true }).inputValue(), "theme");
+}, true));
+
+test("外观备份可导入导出，额外字段和大文件被拒绝且不泄露内容", async () => fixture(async page => {
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "外观", exact: true }).click();
+  await page.getByRole("button", { name: "暖白画册", exact: true }).click();
+  const downloading = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出外观", exact: true }).click();
+  const download = await downloading;
+  assert.equal(download.suggestedFilename(), "pi-studio-appearance.json");
+  const { readFile } = await import("node:fs/promises");
+  const backup = JSON.parse(await readFile(await download.path(), "utf8"));
+  assert.deepEqual(Object.keys(backup).sort(), ["appearance", "mode", "version"]);
+  assert.equal(backup.mode, "light");
+  await page.getByRole("button", { name: "深空黑曜", exact: true }).click();
+  const upload = page.getByLabel("导入外观文件", { exact: true });
+  await upload.setInputFiles({ name: "appearance.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(backup)) });
+  await page.getByText("外观已导入。", { exact: true }).waitFor();
+  assert.equal(await page.locator("html").getAttribute("data-palette"), "alabaster");
+  const original = await page.evaluate(() => localStorage.getItem("pi-studio.appearance"));
+  for (const invalid of [
+    JSON.stringify({ ...backup, apiKey: "synthetic-must-never-render" }),
+    JSON.stringify({ ...backup, appearance: { ...backup.appearance, accent: "url(private)" } }),
+    " ".repeat(17000),
+  ]) {
+    await upload.setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from(invalid) });
+    await page.getByText("配置文件无效，未修改外观。", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => localStorage.getItem("pi-studio.appearance")), original);
+    assert.equal((await page.locator("body").innerText()).includes("synthetic-must-never-render"), false);
+  }
+}, true));
+
+test("离开外观页后迟到的导入不能覆盖当前界面", async () => fixture(async page => {
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "外观", exact: true }).click();
+  const backup = await page.evaluate(() => {
+    const original = File.prototype.text;
+    File.prototype.text = function () {
+      if (this.name === "late.json") return new Promise(resolve => { window.releaseAppearanceImport = resolve; });
+      return original.call(this);
+    };
+    return { version: 1, mode: "light", appearance: { darkPalette: "warm", lightPalette: "alabaster", accent: "iris", corners: "soft", codeFont: "default", density: "compact", motion: "off", ambient: "off", width: "wide", ligatures: false, scroll: "smooth" } };
+  });
+  await page.getByLabel("导入外观文件", { exact: true }).setInputFiles({ name: "late.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(backup)) });
+  await page.waitForFunction(() => typeof window.releaseAppearanceImport === "function");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "会话", exact: true }).click();
+  await page.evaluate(value => window.releaseAppearanceImport(JSON.stringify(value)), backup);
+  await page.waitForTimeout(30);
+  assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.palette, localStorage.getItem("pi-studio.appearance")]), ["obsidian", null]);
+}, true));
+
+test("模型弹层支持搜索、服务商切换与 Escape，选择后保留草稿", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [
+      { id: "deepseek-model", name: "DeepSeek Chat", api: "openai-completions", contextWindow: 64000, maxTokens: 4096 },
+      { id: "reasoner", name: "DeepSeek Reasoner", api: "openai-completions" },
+      { id: "unsupported", name: "Unsupported", api: "unknown" },
+    ] };
+  });
+  await page.getByLabel("消息内容", { exact: true }).fill("模型选择时保留的草稿");
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  const picker = page.getByRole("dialog", { name: "模型选择", exact: true });
+  await picker.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  await trigger.click();
+  await picker.getByRole("option", { name: "DeepSeek Reasoner · reasoner", exact: true }).waitFor();
+  await picker.getByLabel("搜索模型", { exact: true }).fill("reason");
+  assert.equal(await picker.getByLabel("对话模型", { exact: true }).getByRole("option").count(), 2);
+  await picker.getByLabel("对话模型", { exact: true }).selectOption("reasoner");
+  await picker.waitFor({ state: "hidden" });
+  assert.equal(await trigger.innerText().then(text => text.includes("DeepSeek Reasoner")), true);
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "模型选择时保留的草稿");
+  await trigger.click();
+  await picker.getByLabel("搜索模型", { exact: true }).fill("no-matches");
+  await picker.getByText("没有匹配模型。", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  assert.equal(await page.getByLabel("对话模型", { exact: true }).inputValue(), "reasoner");
+  assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
+  await trigger.click();
+  await picker.getByLabel("对话服务商", { exact: true }).selectOption("other");
+  await page.waitForFunction(() => document.querySelector('[aria-label="对话模型"]').value === "other-model");
+  await picker.getByRole("button", { name: "关闭模型菜单", exact: true }).click();
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+}, true));
+
+test("后台状态进入生成时关闭模型弹层并禁止更改当前模型", async () => fixture(async page => {
+  await page.getByRole("button", { name: "选择模型", exact: true }).click();
+  await page.evaluate(() => { fixture.statuses[1].running = true; });
+  await page.getByRole("dialog", { name: "模型选择", exact: true }).waitFor({ state: "hidden" });
+  assert.equal(await page.getByRole("button", { name: "选择模型", exact: true }).isDisabled(), true);
+  assert.equal(await page.getByLabel("对话服务商", { exact: true }).isDisabled(), true);
+}, true));
+
+test("长代码默认完整显示，可手动收起展开，折叠后仍复制完整代码", async () => fixture(async page => {
+  await page.evaluate(() => {
+    const code = Array.from({ length: 60 }, (_, index) => "const value" + index + " = " + index + ";").join("\n");
+    fixture.longCode = code + "\n";
+    fixture.entries[1] = [
+      { id: 1, kind: "pi.assistant", data: null, model: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "~~~ts\n" + code + "\n~~~" }] }] },
+      { id: 2, kind: "studio.chat-input", data: null, model: [{ role: "user", content: "后续问题\n".repeat(100) }] },
+    ];
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async value => { fixture.copiedCode = value; } } });
+  });
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  const block = page.locator(".message-code");
+  const fold = block.getByRole("button", { name: "收起代码 · 60 行", exact: true });
+  await fold.waitFor();
+  assert.ok((await block.locator("pre").boundingBox()).height > 500);
+  await fold.scrollIntoViewIfNeeded();
+  const before = await block.locator(".message-code-heading").boundingBox();
+  await fold.click();
+  assert.ok((await block.locator("pre").boundingBox()).height <= 192);
+  assert.equal(await block.getByRole("button", { name: "展开代码 · 60 行", exact: true }).getAttribute("aria-expanded"), "false");
+  const after = await block.locator(".message-code-heading").boundingBox();
+  assert.ok(Math.abs(before.y - after.y) < 8);
+  await block.getByRole("button", { name: "复制代码", exact: true }).click();
+  assert.equal(await page.evaluate(() => fixture.copiedCode === fixture.longCode), true);
+  await block.getByRole("button", { name: "展开代码 · 60 行", exact: true }).click();
+  assert.ok((await block.locator("pre").boundingBox()).height > 500);
+}, true));
+
+test("对话大纲搜索已加载问题并跳转，分页及键盘跳转不干扰输入", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.realEntryPages = true;
+    fixture.entries[1] = Array.from({ length: 40 }, (_, index) => ({
+      id: index + 1, kind: index % 2 ? "pi.assistant" : "studio.chat-input", data: null,
+      model: [{ role: index % 2 ? "assistant" : "user", content: index % 2 ? [{ type: "text", text: "回复内容\n".repeat(8) }] : "问题 " + ((index + 2) / 2), stopReason: "stop" }],
+    }));
+  });
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  const outline = page.locator(".conversation-outline");
+  await outline.locator("summary").click();
+  assert.equal(await outline.locator("[data-question-id]").count(), 5);
+  await page.getByLabel("搜索对话大纲", { exact: true }).fill("问题 18");
+  await outline.locator('[data-question-id="35"]').click();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-entry-id") === "35");
+  await page.keyboard.press("Alt+ArrowDown");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-entry-id") === "37");
+  await page.keyboard.press("Alt+ArrowUp");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-entry-id") === "35");
+  await page.getByLabel("消息内容", { exact: true }).fill("Alt 组合键不影响草稿");
+  const top = await page.locator(".transcript-list").evaluate(element => element.scrollTop);
+  await page.keyboard.press("Alt+ArrowDown");
+  assert.equal(await page.locator(".transcript-list").evaluate(element => element.scrollTop), top);
+  await outline.locator("summary").click();
+  await page.getByLabel("搜索对话大纲", { exact: true }).fill("");
+  await outline.getByRole("button", { name: "加载更早问题", exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll("[data-question-id]").length === 10);
+  await page.getByLabel("搜索对话大纲", { exact: true }).focus();
+  await page.keyboard.press("Escape");
+  assert.equal(await outline.getAttribute("open"), null);
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "Alt 组合键不影响草稿");
+}, true));
+
+
+test("模型弹层在紧凑窗口内可搜索和关闭，恢复输入焦点路径", async () => fixture(async page => {
+  await page.getByLabel("消息内容", { exact: true }).fill("窄窗仍保留的草稿");
+  for (const [width, height] of [[1280, 850], [705, 564], [390, 844], [320, 394]]) {
+    await page.setViewportSize({ width, height });
+    const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "模型选择", exact: true });
+    const box = await dialog.boundingBox();
+    assert.ok(box.x >= 10 && box.y >= 10 && box.x + box.width <= width - 10 && box.y + box.height <= height - 10);
+    await dialog.getByLabel("搜索模型", { exact: true }).fill("deep");
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
+    assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "窄窗仍保留的草稿");
+  }
+}, true));
+
+
+test("侧栏新建可按需命名，创建后收起命名框并保留原会话", async () => fixture(async page => {
+  const naming = page.locator(".conversation-naming");
+  assert.equal(await naming.getAttribute("open"), null);
+  await naming.locator("summary").click();
+  await page.getByLabel("会话标题", { exact: true }).fill("新命名会话");
+  await page.getByRole("button", { name: "＋ 新建会话", exact: true }).click();
+  await page.locator(".conversation-item.active").filter({ hasText: "新命名会话" }).waitFor();
+  assert.equal(await naming.getAttribute("open"), null);
+  assert.equal(await page.evaluate(() => fixture.conversations.length), 3);
+  assert.equal(await page.getByLabel("会话标题", { exact: true }).inputValue(), "");
+}, true));
+
+test("推理滑杆只显示原生可用档位，提交与会话重新打开保留实际选择", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [{ id: "deepseek-model", name: "Reasoner", api: "openai-completions", thinkingLevels: ["low", "high", "xhigh"] }] };
+  });
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  await page.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  await trigger.click();
+  const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+  await slider.waitFor();
+  assert.equal(await slider.getAttribute("aria-valuetext"), "低");
+  assert.equal(await page.locator(".thinking-ticks").innerText(), "低\n高\n极高");
+  await slider.focus();
+  await page.keyboard.press("End");
+  assert.equal(await slider.getAttribute("aria-valuetext"), "极高");
+  await page.keyboard.press("ArrowLeft");
+  assert.equal(await slider.getAttribute("aria-valuetext"), "高");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+  await page.getByLabel("消息内容", { exact: true }).fill("使用真实推理档位");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  await page.waitForFunction(() => fixture.submitArgs.length === 1 && !document.querySelector('[aria-label="消息内容"]').disabled);
+  assert.equal(await page.evaluate(() => fixture.submitArgs[0].thinkingLevel), "high");
+  await page.getByRole("button", { name: /会话乙.*#2/ }).click();
+  await page.getByRole("button", { name: /会话甲.*#1/ }).click();
+  await trigger.click();
+  assert.equal(await slider.getAttribute("aria-valuetext"), "高");
+  await page.keyboard.press("Escape");
+  assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
+}, true));
+
+test("推理参数随未确认请求按会话保留，重试不改变档位或重复创建输入", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [{ id: "deepseek-model", name: "Reasoner", api: "openai-completions", thinkingLevels: ["off", "low", "high"] }] };
+    fixture.failSubmitOnce = true;
+  });
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  await page.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  await trigger.click();
+  const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+  await slider.focus();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Escape");
+  await page.getByLabel("消息内容", { exact: true }).fill("待确认的推理消息");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  await page.getByRole("button", { name: "重试同一请求", exact: true }).waitFor();
+  assert.equal(await trigger.isDisabled(), true);
+  await page.getByRole("button", { name: /会话乙.*#2/ }).click();
+  await page.getByRole("button", { name: /会话甲.*#1/ }).click();
+  await page.getByRole("button", { name: "重试同一请求", exact: true }).click();
+  await page.waitForFunction(() => fixture.submitArgs.length === 2 && !document.querySelector('[aria-label="消息内容"]').disabled);
+  const inputs = await page.evaluate(() => fixture.submitArgs);
+  assert.deepEqual(inputs[0], inputs[1]);
+  assert.equal(inputs[0].thinkingLevel, "high");
+  assert.equal(await page.evaluate(() => Object.keys(fixture.submissions).length), 1);
+}, true));
+
+test("非推理模型不显示滑杆，切换模型后不携带旧模型档位，窄窗仍可调整", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [
+      { id: "deepseek-model", name: "Reasoner", api: "openai-completions", thinkingLevels: ["off", "low", "high"] },
+      { id: "plain", name: "Plain", api: "openai-completions", thinkingLevels: ["off"] },
+    ] };
+  });
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  await page.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  await page.setViewportSize({ width: 320, height: 394 });
+  await trigger.click();
+  const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+  await slider.scrollIntoViewIfNeeded();
+  await slider.focus();
+  await page.keyboard.press("End");
+  assert.equal(await slider.getAttribute("aria-valuetext"), "高");
+  const box = await page.getByRole("dialog", { name: "模型选择", exact: true }).boundingBox();
+  assert.ok(box.x >= 10 && box.y >= 10 && box.x + box.width <= 310 && box.y + box.height <= 384);
+  await page.getByLabel("对话模型", { exact: true }).selectOption("plain");
+  await trigger.click();
+  assert.equal(await slider.count(), 0);
+  await page.keyboard.press("Escape");
+  await page.getByLabel("消息内容", { exact: true }).fill("普通模型不携带推理档位");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  await page.waitForFunction(() => fixture.submitArgs.length === 1);
+  assert.equal(await page.evaluate(() => fixture.submitArgs[0].thinkingLevel ?? "off"), "off");
+}, true));
+
+test("模型胶囊有悬停扫光与按压反馈，弹层状态和草稿保持一致", async () => fixture(async page => {
+  await page.bringToFront();
+  await page.getByLabel("消息内容", { exact: true }).fill("动效不改变草稿");
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  const box = await trigger.boundingBox();
+  await page.mouse.move(box.x + 12, box.y + box.height / 2);
+  const first = await trigger.evaluate(element => element.style.getPropertyValue("--reflect-x"));
+  await page.mouse.move(box.x + box.width - 15, box.y + box.height / 2);
+  assert.notEqual(await trigger.evaluate(element => element.style.getPropertyValue("--reflect-x")), first);
+  assert.ok(await trigger.evaluate(element => element.getAnimations({ subtree: true }).some(animation => animation.animationName === "capsule-sheen" && animation.playState === "running")));
+  await page.mouse.down();
+  await page.waitForTimeout(250);
+  assert.ok(await trigger.evaluate(element => new DOMMatrixReadOnly(getComputedStyle(element).transform).a < 1));
+  await page.mouse.up();
+  const dialog = page.getByRole("dialog", { name: "模型选择", exact: true });
+  await dialog.waitFor();
+  assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector(".model-picker-trigger").getAttribute("aria-expanded") === "false");
+  await page.mouse.move(1, 1);
+  assert.equal(await trigger.evaluate(element => element.style.getPropertyValue("--reflect-x")), "");
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "动效不改变草稿");
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+}, true));
+
+test("切档充能与流光真实运动，窗口失焦暂停、恢复焦点继续且关闭菜单后停止", async () => fixture(async page => {
+  await page.bringToFront();
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [{ id: "deepseek-model", name: "Reasoner", api: "openai-completions", thinkingLevels: ["off", "low", "high", "xhigh", "max"] }] };
+  });
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  await page.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  await trigger.click();
+  const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+  await slider.focus();
+  const before = await page.locator(".thinking-energy").evaluate(element => element.getBoundingClientRect().width);
+  await page.keyboard.press("End");
+  await page.waitForTimeout(220);
+  assert.equal(await slider.getAttribute("aria-valuetext"), "最高");
+  assert.ok((await page.locator(".thinking-energy").evaluate(element => element.getBoundingClientRect().width)) > before + 150);
+  const orbit = page.locator(".thinking-control .model-orbit");
+  const time = () => orbit.evaluate(element => element.getAnimations().find(animation => animation.animationName === "capsule-orbit")?.currentTime);
+  const start = await time();
+  await page.waitForTimeout(120);
+  assert.ok(await time() > start + 50);
+  assert.equal(await page.locator(".thinking-energy").evaluate(element => getComputedStyle(element, "::after").animationName), "capsule-sheen");
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  assert.equal(await orbit.evaluate(element => getComputedStyle(element).animationPlayState), "paused");
+  const paused = await time();
+  await page.waitForTimeout(120);
+  assert.ok(Math.abs(await time() - paused) < 20);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForTimeout(120);
+  assert.ok(await time() > paused + 50);
+  await page.keyboard.press("Escape");
+  await page.mouse.move(1, 1);
+  await page.getByLabel("消息内容", { exact: true }).focus();
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === "running" && animation.effect?.getTiming().iterations === Infinity).length), 0);
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+}, true));
+
+test("明暗主题与窄窗保留胶囊可操作性，关闭动效和系统减少动态效果均生效", async () => fixture(async page => {
+  await page.bringToFront();
+  await page.evaluate(() => {
+    fixture.modelsByProvider = { deepseek: [{ id: "deepseek-model", name: "Reasoner", api: "openai-completions", thinkingLevels: ["off", "high", "xhigh"] }] };
+  });
+  const trigger = page.getByRole("button", { name: "选择模型", exact: true });
+  await trigger.click();
+  await page.getByRole("button", { name: "刷新模型目录", exact: true }).click();
+  for (const theme of ["dark", "light"]) {
+    if (theme === "light") await page.getByRole("button", { name: "切换至浅色模式", exact: true }).click();
+    await trigger.click();
+    const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+    await slider.focus();
+    await page.keyboard.press("End");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    for (const selector of [".thinking-control .model-glyph", ".thinking-control .model-orbit", ".model-picker-dialog"]) {
+      assert.equal(await page.locator(selector).evaluate(element => getComputedStyle(element).animationName), "none");
+    }
+    assert.equal(await page.locator(".thinking-energy").evaluate(element => getComputedStyle(element, "::after").animationName), "none");
+    await page.keyboard.press("Home");
+    assert.equal(await slider.getAttribute("aria-valuetext"), "关闭");
+    await page.keyboard.press("Escape");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+  }
+  const nav = page.getByRole("navigation", { name: "工作区导航" });
+  await nav.getByRole("button", { name: "外观", exact: true }).click();
+  await page.getByLabel("界面过渡", { exact: true }).selectOption("off");
+  await nav.getByRole("button", { name: "会话", exact: true }).click();
+  await page.setViewportSize({ width: 320, height: 394 });
+  await trigger.click();
+  const slider = page.getByRole("slider", { name: "推理强度", exact: true });
+  await slider.focus();
+  await page.keyboard.press("End");
+  assert.equal(await page.locator(".thinking-control .model-orbit").evaluate(element => getComputedStyle(element).animationName), "none");
+  const box = await page.getByRole("dialog", { name: "模型选择", exact: true }).boundingBox();
+  assert.ok(box.x >= 10 && box.y >= 10 && box.x + box.width <= 310 && box.y + box.height <= 384);
+  await page.keyboard.press("Escape");
+  const triggerBox = await trigger.boundingBox();
+  assert.ok(triggerBox.x >= 0 && triggerBox.x + triggerBox.width <= 320);
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+}, true));
+
+test("上下文试管展示上次输入及缓存明细，不随模型选择或草稿变化，也不重复轮询历史", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.contextUsages = { 1: { conversationId: 1, latestEntryId: 2, state: "reported", lastRequest: {
+      providerId: "deepseek", modelId: "deepseek-model", inputTokens: 1100, outputTokens: 40,
+      cacheReadTokens: 100, cacheWriteTokens: 0, reasoningTokens: 7, contextWindow: 2000,
+    } } };
+    fixture.statuses[1].latestEntryId = 2;
+  });
+  const trigger = page.getByRole("button", { name: "查看上下文用量", exact: true });
+  await trigger.filter({ hasText: "上次输入 55%" }).waitFor();
+  await page.getByLabel("消息内容", { exact: true }).fill("尚未发送的草稿不计入用量");
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "上下文用量", exact: true });
+  assert.equal(await dialog.locator("dd").allTextContents().then(values => values.join("|")), "1,100 tokens|2,000 tokens|40|100|0|7");
+  await dialog.getByText("deepseek / deepseek-model", { exact: true }).waitFor();
+  const count = await page.evaluate(() => fixture.contextUsageArgs.length);
+  await page.waitForTimeout(1200);
+  assert.equal(await page.evaluate(() => fixture.contextUsageArgs.length), count);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "选择模型", exact: true }).click();
+  await page.getByLabel("对话服务商", { exact: true }).selectOption("other");
+  await page.waitForFunction(() => document.querySelector('[aria-label="对话模型"]').value === "other-model");
+  await page.keyboard.press("Escape");
+  await trigger.filter({ hasText: "上次输入 55%" }).waitFor();
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "尚未发送的草稿不计入用量");
+  assert.equal(await page.evaluate(() => fixture.submitArgs.length), 0);
+}, true));
+
+test("用量未报告或模型目录缺失时不伪造百分比，读取失败可安全重试", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.contextUsages = { 1: { conversationId: 1, latestEntryId: 2, state: "unreported", lastRequest: null } };
+    fixture.statuses[1].latestEntryId = 2;
+  });
+  const trigger = page.getByRole("button", { name: "查看上下文用量", exact: true });
+  await trigger.filter({ hasText: "上次输入 —" }).waitFor();
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "上下文用量", exact: true });
+  await dialog.getByText("服务商未报告有效输入用量。", { exact: true }).waitFor();
+  await page.evaluate(() => { fixture.failContextUsage = true; });
+  await dialog.getByRole("button", { name: "刷新用量", exact: true }).click();
+  await dialog.getByRole("alert").waitFor();
+  assert.equal((await page.locator("body").textContent()).includes("synthetic-context-private"), false);
+  await page.evaluate(() => {
+    fixture.failContextUsage = false;
+    fixture.contextUsages[1] = { conversationId: 1, latestEntryId: 2, state: "reported", lastRequest: {
+      providerId: "removed", modelId: "old-model", inputTokens: 80, outputTokens: null,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, contextWindow: null,
+    } };
+  });
+  await dialog.getByRole("button", { name: "刷新用量", exact: true }).click();
+  await dialog.getByText("目录不可用", { exact: true }).waitFor();
+  await dialog.getByText("80 tokens", { exact: true }).waitFor();
+  assert.equal((await trigger.innerText()).includes("%"), false);
+  assert.equal(await dialog.locator("dd").filter({ hasText: "未报告" }).count(), 1);
+  await page.evaluate(() => { fixture.contextUsages[1].lastRequest.inputTokens = 1; fixture.contextUsages[1].lastRequest.contextWindow = 64000; });
+  await dialog.getByRole("button", { name: "刷新用量", exact: true }).click();
+  await trigger.filter({ hasText: "上次输入 <0.1%" }).waitFor();
+}, true));
+
+test("切换会话后迟到的上下文读数不串入新会话", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.contextUsages = { 1: { conversationId: 1, latestEntryId: 2, state: "reported", lastRequest: {
+      providerId: "old", modelId: "old", inputTokens: 99, outputTokens: 2,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, contextWindow: 100,
+    } } };
+    fixture.holdContextUsageFor = 1;
+    fixture.statuses[1].latestEntryId = 2;
+  });
+  await page.waitForFunction(() => typeof fixture.releaseContextUsage === "function");
+  await page.evaluate(() => { fixture.oldContextRelease = fixture.releaseContextUsage; fixture.holdContextUsageFor = null; });
+  await page.getByRole("button", { name: /会话乙.*#2/ }).click();
+  const trigger = page.getByRole("button", { name: "查看上下文用量", exact: true });
+  await trigger.filter({ hasText: "新上下文" }).waitFor();
+  await page.evaluate(() => fixture.oldContextRelease());
+  await page.waitForTimeout(80);
+  assert.equal((await trigger.innerText()).includes("99%"), false);
+  await trigger.click();
+  await page.getByRole("dialog", { name: "上下文用量", exact: true }).getByText("当前上下文还没有请求用量。", { exact: true }).waitFor();
+}, true));
+
+test("试管中的重置沿用确认流程并清除旧读数，生成时禁止重置", async () => fixture(async page => {
+  await page.evaluate(() => {
+    fixture.contextUsages = { 1: { conversationId: 1, latestEntryId: 2, state: "reported", lastRequest: {
+      providerId: "deepseek", modelId: "deepseek-model", inputTokens: 90, outputTokens: 4,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: null, contextWindow: 100,
+    } } };
+    fixture.statuses[1].latestEntryId = 2;
+  });
+  const trigger = page.getByRole("button", { name: "查看上下文用量", exact: true });
+  await trigger.filter({ hasText: "上次输入 90%" }).waitFor();
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "上下文用量", exact: true });
+  await dialog.getByText("上次输入已接近该模型目录窗口，可开始新上下文。", { exact: true }).waitFor();
+  await page.evaluate(() => { fixture.statuses[1].running = true; });
+  await page.waitForFunction(() => document.querySelector('.context-usage-dialog footer button:last-child').disabled);
+  await page.evaluate(() => { fixture.statuses[1].running = false; });
+  await dialog.getByRole("button", { name: "开始新上下文", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await page.evaluate(() => fixture.resetArgs.length), 0);
+  await page.getByRole("button", { name: "确认开始新上下文", exact: true }).click();
+  await trigger.filter({ hasText: "新上下文" }).waitFor();
+  await trigger.click();
+  assert.equal((await dialog.innerText()).includes("90%"), false);
+  assert.equal(await page.evaluate(() => fixture.resetArgs.length), 1);
+}, true));
+
+test("上下文弹层适配明暗与窄窗，Escape 恢复焦点且不会遮断发送路径", async () => fixture(async page => {
+  await page.getByLabel("消息内容", { exact: true }).fill("窄窗用量检查");
+  const trigger = page.getByRole("button", { name: "查看上下文用量", exact: true });
+  for (const [width, height] of [[1280, 850], [705, 564], [390, 844], [320, 394]]) {
+    await page.setViewportSize({ width, height });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "上下文用量", exact: true });
+    const box = await dialog.boundingBox();
+    assert.ok(box.x >= 10 && box.y >= 10 && box.x + box.width <= width - 10 && box.y + box.height <= height - 10);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
+  }
+  await page.getByRole("button", { name: "切换至浅色模式", exact: true }).click();
+  await trigger.click();
+  await page.getByRole("dialog", { name: "上下文用量", exact: true }).getByText("当前上下文还没有请求用量。", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  assert.equal(await page.getByRole("button", { name: "发送消息", exact: true }).isEnabled(), true);
+  assert.equal(await page.getByLabel("消息内容", { exact: true }).inputValue(), "窄窗用量检查");
+}, true));

@@ -71,11 +71,11 @@ export default function CustomProviderSettings({ onSaved, onBusy }: {
   }
   return (
     <div className="provider-editor" aria-busy={busy || loading}>
-      <h3>自定义服务商配置</h3>
-      <p className="muted">OpenAI 兼容 Chat Completions 接口；每个配置先支持一个文本模型。</p>
+      <h3 className="sr-only">自定义服务商配置</h3>
+      <p className="muted">支持 OpenAI 兼容接口。</p>
       <button type="button" disabled={busy || loading} onClick={() => { choose(""); setRevision((value) => value + 1); }}>刷新配置</button>
       {loading && <p className="muted" role="status">正在读取自定义配置...</p>}
-      {!loading && !loadError && items.length === 0 && <p className="provider-empty" role="status">尚未添加自定义服务商，可填写下方表单。内置服务商可直接在“密钥与连接”中使用。</p>}
+      {!loading && !loadError && items.length === 0 && <p className="provider-empty" role="status">暂无自定义服务商。</p>}
       <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <fieldset className="provider-config-fields provider-config-grid" disabled={busy || loading || loadError}>
           <label className="provider-field"><span>编辑配置</span>
@@ -88,14 +88,14 @@ export default function CustomProviderSettings({ onSaved, onBusy }: {
             <input required aria-label="配置标识" value={form.id} readOnly={Boolean(selected)} maxLength={63}
               pattern="custom-[a-z0-9][a-z0-9-]{0,55}" onChange={(event) => setForm({ ...form, id: event.target.value })} />
           </label>
-          <p className="muted">以 custom- 开头，只使用小写字母、数字和连字符；不会覆盖内置服务商。保存会更新相同标识的配置。</p>
+          <p className="muted">标识使用 custom- 前缀、小写字母、数字和连字符；相同标识会覆盖已有配置。</p>
           <label className="provider-field"><span>显示名称</span>
             <input required aria-label="显示名称" maxLength={80} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </label>
           <label className="provider-field"><span>API 基础地址</span>
             <input required type="url" aria-label="API 基础地址" maxLength={2048} placeholder="https://example.com/v1" value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} />
           </label>
-          <p className="muted">填写基础地址，不含 /chat/completions、认证信息或查询参数。远程地址使用 HTTPS，本机回环地址允许 HTTP。</p>
+          <p className="muted">不含 /chat/completions、认证信息和查询参数。远程地址须为 HTTPS。</p>
           <label className="provider-field"><span>模型 ID</span>
             <input required aria-label="模型 ID" maxLength={256} value={form.modelId} onChange={(event) => setForm({ ...form, modelId: event.target.value })} />
           </label>
@@ -105,7 +105,7 @@ export default function CustomProviderSettings({ onSaved, onBusy }: {
           <label className="provider-field"><span>最大输出 token</span>
             <input required type="number" aria-label="最大输出 token" min={16} max={Math.min(form.contextWindow, 1000000)} step={1} value={form.maxTokens} onChange={(event) => setForm({ ...form, maxTokens: Number(event.target.value) })} />
           </label>
-          <p className="muted">配置不保存密钥。保存后到“密钥与连接”设置 API Key。修改地址后，连接测试会向新地址发送该标识已保存的 Key。</p>
+          <p className="muted">修改地址后，连接测试会向新地址发送已保存的 Key。</p>
           <div className="provider-actions">
             <button type="submit" className="primary">{busy ? "正在处理..." : "保存配置"}</button>
             {selected && <button type="button" onClick={() => void save(true)}>删除配置（保留凭据）</button>}

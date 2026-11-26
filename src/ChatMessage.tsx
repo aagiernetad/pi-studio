@@ -1,4 +1,4 @@
-import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -31,9 +31,26 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const code = isValidElement<{ children?: ReactNode; className?: string }>(child) ? child : null;
   const text = typeof code?.props.children === "string" ? code.props.children : "";
   const language = /\blanguage-(\S+)/.exec(code?.props.className ?? "")?.[1] ?? "代码";
-  return <div className="message-code">
-    <div className="message-code-heading"><span>{language}</span><CopyButton text={text} label="复制代码" /></div>
-    <pre>{children}</pre>
+  const [collapsed, setCollapsed] = useState(false);
+  const heading = useRef<HTMLDivElement>(null);
+  const anchor = useRef<number | null>(null);
+  const codeId = useId();
+  const lines = text.replace(/\n$/, "").split("\n").length;
+  useLayoutEffect(() => {
+    if (anchor.current === null || !heading.current) return;
+    const scroller = heading.current.closest(".transcript-list");
+    if (scroller) scroller.scrollTop += heading.current.getBoundingClientRect().top - anchor.current;
+    anchor.current = null;
+  }, [collapsed]);
+  return <div className="message-code" data-collapsed={collapsed}>
+    <div className="message-code-heading" ref={heading}><span>{language}</span><div className="message-code-actions">
+      {lines >= 48 && <button type="button" aria-expanded={!collapsed} aria-controls={codeId}
+        onClick={() => { anchor.current = heading.current?.getBoundingClientRect().top ?? null; setCollapsed(value => !value); }}>
+        {collapsed ? "展开代码" : "收起代码"} · {lines} 行
+      </button>}
+      <CopyButton text={text} label="复制代码" />
+    </div></div>
+    <pre id={codeId}>{children}</pre>
   </div>;
 }
 
