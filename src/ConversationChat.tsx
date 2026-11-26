@@ -10,6 +10,11 @@ type Status = {
   contextReset: boolean;
 };
 type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string };
+export type ConversationDraft = { content: string; input: Input | null };
+export type DraftUpdate =
+  | { type: "edit"; content: string }
+  | { type: "pending"; content: string; input: Input }
+  | { type: "settled"; requestId: string; clear: boolean };
 const supported = (api: string) => ["openai-completions", "openai-responses", "anthropic-messages"].includes(api);
 function message(cause: unknown): string {
   const code = typeof cause === "string" ? /^([A-Z_]+):/.exec(cause)?.[1] : "";
@@ -27,8 +32,9 @@ function message(cause: unknown): string {
 }
 const rejected = (cause: unknown) => typeof cause === "string" && /^(INVALID_PARAMS|MODEL_NOT_FOUND|PROVIDER_NOT_CONFIGURED|CHAT_UNSUPPORTED|CONVERSATION_BUSY|CONVERSATION_NOT_FOUND|REQUEST_ID_CONFLICT|CHAT_NOT_RESUMABLE|CREDENTIAL_STORE_UNAVAILABLE):/.test(cause);
 
-export default function ConversationChat({ conversationId, onEntriesChanged, catalogRevision = 0 }: {
+export default function ConversationChat({ conversationId, onEntriesChanged, catalogRevision = 0, draft, onDraftUpdate }: {
   conversationId: number; onEntriesChanged: () => void; catalogRevision?: number;
+  draft?: ConversationDraft; onDraftUpdate: (update: DraftUpdate) => void;
 }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [providerId, setProviderId] = useState("");
@@ -38,17 +44,17 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState("");
   const [catalogError, setCatalogError] = useState("");
-  const [error, setError] = useState("");
-  const [content, setContent] = useState("");
+  const [error, setError] = useState(draft?.input ? "上次发送结果尚未确认，可重试同一请求核对，不会重复发送。" : "");
+  const [content, setContent] = useState(draft?.content ?? "");
   const [action, setAction] = useState<"send" | "stop" | "resume" | "reset" | null>(null);
-  const [hasPending, setHasPending] = useState(false);
+  const [hasPending, setHasPending] = useState(Boolean(draft?.input));
   const [hasPendingResume, setHasPendingResume] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [hasPendingReset, setHasPendingReset] = useState(false);
   const [revision, setRevision] = useState(0);
   const mounted = useRef(false);
   const working = useRef(false);
-  const pending = useRef<Input | null>(null);
+  const pending = useRef<Input | null>(draft?.input ?? null);
   const pendingResume = useRef<{ conversationId: number; requestId: string } | null>(null);
   const pendingReset = useRef<{ conversationId: number; requestId: string } | null>(null);
   const minimumEntryId = useRef<number | null>(null);
@@ -119,11 +125,13 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
     if (!pending.current) pending.current = { conversationId, requestId: crypto.randomUUID(), providerId, modelId, content: content.trim() };
     const input = pending.current;
     if (!input.content) return;
+    onDraftUpdate({ type: "pending", content, input });
     working.current = true;
     setAction("send");
     setError("");
     try {
       await invoke("conversation_chat_submit", { input });
+      onDraftUpdate({ type: "settled", requestId: input.requestId, clear: true });
       if (mounted.current) {
         pending.current = null;
         setHasPending(false);
@@ -132,9 +140,10 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         onEntries.current();
       }
     } catch (cause: unknown) {
+      const definitive = rejected(cause);
+      if (definitive) onDraftUpdate({ type: "settled", requestId: input.requestId, clear: false });
       if (mounted.current) {
         setError(message(cause));
-        const definitive = rejected(cause);
         if (definitive) pending.current = null;
         setHasPending(!definitive);
       }
@@ -224,8 +233,11 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey) || event.nativeEvent.isComposing) return;
           event.preventDefault();
           if (!event.repeat && !event.currentTarget.disabled && !modelsLoading && content.trim() && selected && supported(selected.api)) void send();
-        }} onChange={(event) => setContent(event.target.value)} />
-      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。</p>
+        }} onChange={(event) => {
+          setContent(event.target.value);
+          onDraftUpdate({ type: "edit", content: event.target.value });
+        }} />
+      <p className="muted chat-shortcut">Ctrl / ⌘ + Enter 发送，Enter 换行。草稿在本次打开期间按会话保留。</p>
       <div className="provider-actions">
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
           {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}

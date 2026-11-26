@@ -89,6 +89,7 @@ async function fixture(run, withChat = false) {
             const input = args.input;
             state.submitArgs.push(structuredClone(input));
             if (state.submissions[input.requestId]) return { submissionId: state.submissions[input.requestId] };
+            if (state.rejectSubmitOnce) { state.rejectSubmitOnce = false; throw 'PROVIDER_NOT_CONFIGURED: synthetic-no-credential'; }
             const id = Object.keys(state.submissions).length + 1;
             state.submissions[input.requestId] = id;
             const current = chatStatus(input.conversationId);
@@ -102,6 +103,7 @@ async function fixture(run, withChat = false) {
               ...(state.slowChat ? [] : [{ id: id * 2, kind: "pi.assistant", data: null, model: [{ role: "assistant", content: [{ type: "text", text: "本地页面回复" }], stopReason: "stop" }] }]),
               { id: id * 2 - 1, kind: "studio.chat-input", data: {}, model: [{ role: "user", content: input.content }] },
             ];
+            if (state.holdSubmitReply) await new Promise(resolve => { state.releaseSubmitReply = resolve; });
             if (state.failSubmitOnce) { state.failSubmitOnce = false; throw "IPC_TIMEOUT: synthetic-private-marker"; }
             return { submissionId: id };
           }
@@ -857,3 +859,76 @@ test("自定义配置读取失败可恢复，重试后表单可保存并进入�
   await panel.getByRole('heading', { name: '1. 保存访问凭据', exact: true }).waitFor();
   await panel.getByRole('heading', { name: '2. 测试模型连接', exact: true }).waitFor();
 }));
+
+
+test("按会话恢复草稿，搜索隐藏后仍可找回，清空与重新打开不留下持久内容", async () => fixture(async (page) => {
+  const input = page.getByLabel('消息内容', { exact: true });
+  await input.fill('甲的多行草稿\n第二行');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await input.inputValue(), '');
+  await input.fill('乙的独立草稿');
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await input.inputValue(), '甲的多行草稿\n第二行');
+  await page.getByLabel('搜索会话标题', { exact: true }).fill('没有的标题');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.getByText('没有匹配标题的会话。', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '清除搜索', exact: true }).click();
+  await input.waitFor();
+  assert.equal(await input.inputValue(), '甲的多行草稿\n第二行');
+  await input.fill('');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await input.inputValue(), '乙的独立草稿');
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await input.inputValue(), '');
+  assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length, window.fixture.submitArgs.length]), [0, 0, 0]);
+  await page.reload();
+  await input.waitFor();
+  assert.equal(await input.inputValue(), '');
+}, true));
+
+test("未确认消息切换会话后仍沿用原请求，确认后清空自身草稿", async () => fixture(async (page) => {
+  const input = page.getByLabel('消息内容', { exact: true });
+  await page.evaluate(() => { window.fixture.failSubmitOnce = true; });
+  await input.fill('跨会话核对同一条消息');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.getByRole('button', { name: '重试同一请求', exact: true }).waitFor();
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await input.fill('乙的草稿不能被甲清除');
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await input.inputValue(), '跨会话核对同一条消息');
+  assert.equal(await input.isDisabled(), true);
+  await page.getByRole('button', { name: '重试同一请求', exact: true }).click();
+  await page.waitForFunction(() => window.fixture.submitArgs.length === 2);
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+  const result = await page.evaluate(() => ({ args: window.fixture.submitArgs, count: Object.keys(window.fixture.submissions).length }));
+  assert.deepEqual(result.args[0], result.args[1]);
+  assert.equal(result.count, 1);
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await input.inputValue(), '乙的草稿不能被甲清除');
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await input.inputValue(), '');
+}, true));
+
+test("发送的迟到确认只清理源草稿，明确拒绝的消息保留为可编辑草稿", async () => fixture(async (page) => {
+  const input = page.getByLabel('消息内容', { exact: true });
+  await page.evaluate(() => { window.fixture.holdSubmitReply = true; });
+  await input.fill('甲已发送等待确认');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseSubmitReply === 'function');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await input.fill('乙未发送的草稿');
+  await page.evaluate(() => { window.fixture.holdSubmitReply = false; window.fixture.releaseSubmitReply(); });
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await input.inputValue(), '');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await input.inputValue(), '乙未发送的草稿');
+  await page.evaluate(() => { window.fixture.rejectSubmitOnce = true; });
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: '请先在服务商设置中保存 API Key。' }).waitFor();
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await input.inputValue(), '乙未发送的草稿');
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+  await input.fill('乙可修改后重新发送');
+  assert.equal(await page.getByRole('button', { name: '发送消息', exact: true }).isEnabled(), true);
+}, true));

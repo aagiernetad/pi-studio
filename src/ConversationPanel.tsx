@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ConversationTranscript from "./ConversationTranscript";
-import ConversationChat from "./ConversationChat";
+import ConversationChat, { type ConversationDraft, type DraftUpdate } from "./ConversationChat";
 import ConversationTitleEditor from "./ConversationTitleEditor";
 import ConversationUsage from "./ConversationUsage";
 
@@ -25,6 +25,23 @@ type ConversationCreateResult = {
 const PAGE_SIZE = 20;
 
 export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevision?: number }) {
+  // 仅保存在当前工作台内存中，不写入浏览器存储、Transcript 或 SQLite。
+  const drafts = useRef(new Map<number, ConversationDraft>());
+  function updateDraft(id: number, update: DraftUpdate) {
+    const current = drafts.current.get(id);
+    if (update.type === "edit") {
+      if (current?.input) return;
+      if (update.content) drafts.current.set(id, { content: update.content, input: null });
+      else drafts.current.delete(id);
+    } else if (update.type === "pending") {
+      drafts.current.set(id, { content: update.content, input: update.input });
+    } else if (current?.input?.requestId === update.requestId) {
+      // 迟到结果只能结算自身请求，不能抹掉另一会话或后来的草稿。
+      if (update.clear) drafts.current.delete(id);
+      else drafts.current.set(id, { ...current, input: null });
+    }
+  }
+
   const [conversations, setConversations] = useState<
     UserConversation[]
   >([]);
@@ -328,6 +345,7 @@ export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevi
                   }}
                />
               <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id} catalogRevision={catalogRevision}
+                draft={drafts.current.get(selected.id)} onDraftUpdate={(update) => updateDraft(selected.id, update)}
                 onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
               <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
             </>
