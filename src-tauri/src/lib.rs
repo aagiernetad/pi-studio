@@ -120,6 +120,11 @@ async fn conversation_list(
 }
 
 #[tauri::command]
+async fn conversation_fork(state: State<'_, RuntimeState>, input: Value) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "conversation.fork", input).await
+}
+
+#[tauri::command]
 async fn conversation_rename(
     state: State<'_, RuntimeState>,
     conversation_id: i64,
@@ -419,6 +424,7 @@ pub fn run() {
             conversation_create,
             conversation_list,
             conversation_rename,
+            conversation_fork,
             conversation_usage,
             conversation_get,
             conversation_entries,

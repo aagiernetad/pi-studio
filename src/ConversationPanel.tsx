@@ -10,6 +10,7 @@ type UserConversation = {
   id: number;
   title: string;
   createdAt: number;
+  forkedFrom?: { conversationId: number; entryId: number };
 };
 
 type ConversationListResult = {
@@ -307,6 +308,7 @@ export default function ConversationPanel() {
                 ).toLocaleString("zh-CN")}
               </p>
 
+              {selected.forkedFrom && <p className="muted">分支来自会话 #{selected.forkedFrom.conversationId} 的回复 #{selected.forkedFrom.entryId}；用量仅统计此分支的新请求。</p>}
               <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id}
                 onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
               <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
@@ -314,6 +316,16 @@ export default function ConversationPanel() {
                   key={selected.id}
                   conversationId={selected.id}
                   revision={transcriptRevision}
+                  forkDisabled={loading || loadingMore || creating || renaming}
+                  onForked={(created) => {
+                    // 淘汰旧列表分页；重新查询会保留刚创建分支的选中状态。
+                    listGeneration.current += 1;
+                    setConversations((previous) => [created, ...previous.filter((item) => item.id !== created.id)]);
+                    setSelectedId(created.id);
+                    setSearchDraft(""); setQuery("");
+                    setRefreshKey((value) => value + 1);
+                    setNotice("分支会话已创建，可以从这条回复继续新的方向。原会话已保留。");
+                  }}
                />
             </>
           ) : (

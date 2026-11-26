@@ -20,6 +20,8 @@ type TranscriptPage = {
 type Props = {
   conversationId: number;
   revision?: number;
+  onForked?: (conversation: { id: number; title: string; createdAt: number }) => void;
+  forkDisabled?: boolean;
 };
 
 const PAGE_SIZE = 10;
@@ -55,6 +57,8 @@ function modelText(value: unknown): string | null {
 export default function ConversationTranscript({
   conversationId,
   revision = 0,
+  onForked,
+  forkDisabled = false,
 }: Props) {
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [nextCursor, setNextCursor] =
@@ -65,6 +69,30 @@ export default function ConversationTranscript({
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const generation = useRef(0);
+  const mounted = useRef(true);
+  const pendingFork = useRef<{ requestId: string; entryId: number } | null>(null);
+  const [forking, setForking] = useState(false);
+  const [forkError, setForkError] = useState("");
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  async function fork(entryId: number) {
+    if (forking || forkDisabled || !onForked) return;
+    pendingFork.current ??= { requestId: crypto.randomUUID(), entryId };
+    setForking(true);
+    setForkError("");
+    try {
+      const result = await invoke<{ conversation: { id: number; title: string; createdAt: number } }>("conversation_fork", {
+        input: { conversationId, ...pendingFork.current },
+      });
+      if (!mounted.current) return;
+      pendingFork.current = null;
+      onForked(result.conversation);
+    } catch {
+      if (mounted.current) setForkError("创建分支结果未确认，请重试同一请求。");
+    } finally {
+      if (mounted.current) setForking(false);
+    }
+  }
 
   // 会话变化或手动刷新时，重新加载第一页。
   useEffect(() => {
@@ -160,6 +188,10 @@ export default function ConversationTranscript({
         显示 Durable 中的真实 Entry，最新记录在前。
       </p>
 
+      {forkError && <div className="error" role="alert">{forkError}
+        <button type="button" disabled={forking || forkDisabled} onClick={() => { if (pendingFork.current) void fork(pendingFork.current.entryId); }}>重试创建分支</button>
+      </div>}
+
       {error && (
         <div className="error" role="alert">
           {error}
@@ -190,6 +222,15 @@ export default function ConversationTranscript({
               {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
                 <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
                 <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
+
+              {onForked && entry.kind === "pi.assistant" && Array.isArray(entry.model) && entry.model.some((message: unknown) => {
+                if (!message || typeof message !== "object") return false;
+                const value = message as Record<string, unknown>;
+                return value.role === "assistant" && (value.stopReason === "stop" || value.stopReason === "length");
+              }) && <button type="button" disabled={forkDisabled || forking || pendingFork.current !== null}
+                title="继承截至这条回复的上下文，原会话保留" onClick={() => void fork(entry.id)}>
+                从此处新建分支会话
+              </button>}
 
               {entry.model !== null &&
                 entry.model !== undefined && (

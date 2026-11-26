@@ -472,3 +472,165 @@ test("context reset rejects busy and invalid requests and prevents resuming the 
     assert.equal(invalid.error.code, "INVALID_PARAMS");
   }
 });
+
+
+test("native fork is atomic and idempotent, inherits only selected history and model, and starts its own usage", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.enableUsage();
+  const first = await f.request("conversation.chat.submit", f.input("分支之前唯一标记"));
+  assert.ok(first.success);
+  await f.settled(first.result.submissionId);
+  const source = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(source);
+  const history = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const boundary = history.items.find((entry) => entry.kind === "pi.assistant");
+  assert.ok(boundary);
+  const second = await f.request("conversation.chat.submit", f.input("分支之后不应继承的标记"));
+  assert.ok(second.success);
+  await f.settled(second.result.submissionId);
+  const before = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const originalUsage = await f.request("conversation.usage", { conversationId: source.id });
+  await f.credentials.delete(f.config.id);
+  const input = { conversationId: source.id, entryId: boundary.id, requestId: randomUUID() };
+  const [fork, duplicate] = await Promise.all([f.request("conversation.fork", input), f.request("conversation.fork", input)]);
+  assert.ok(fork.success && duplicate.success);
+  assert.deepEqual(fork.result, duplicate.result);
+  const child = fork.result.conversation as { id: number; title: string; forkedFrom: { conversationId: number; entryId: number } };
+  assert.notEqual(child.id, source.id);
+  assert.equal(child.title, "Chat test（分支）");
+  assert.deepEqual(child.forkedFrom, { conversationId: source.id, entryId: boundary.id });
+  const native = await f.host.conversation(child.id as ConversationId);
+  assert.ok(native);
+  assert.deepEqual(await native.entries({}, 20, undefined, BACKGROUND_CONTEXT), history);
+  const status = await f.request("conversation.chat.status", { conversationId: child.id });
+  assert.ok(status.success);
+  assert.deepEqual(status.result.model, { providerId: f.config.id, modelId: f.config.modelId });
+  assert.equal(status.result.running, false);
+  assert.equal(status.result.canResume, false);
+  const usage = await f.request("conversation.usage", { conversationId: child.id });
+  assert.ok(usage.success);
+  assert.deepEqual(usage.result, { items: [], nextAfterModel: null });
+  assert.equal(f.calls.length, 2, "Creating a fork needs no credentials or model request");
+  await f.reopen();
+  const retry = await f.request("conversation.fork", input);
+  assert.ok(retry.success);
+  assert.deepEqual(retry.result, fork.result);
+  const list = await f.request("conversation.list", {});
+  assert.ok(list.success);
+  assert.equal((list.result.items as { id: number }[]).length, 2);
+  await f.credentials.modify(f.config.id, async () => ({ type: "api_key", key: "synthetic-chat-secret" }));
+  const submitted = await f.request("conversation.chat.submit", { ...f.input("分支自己的问题"), conversationId: child.id });
+  assert.ok(submitted.success);
+  assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+  const messages = JSON.stringify(f.calls[2]?.messages);
+  assert.ok(messages.includes("分支之前唯一标记"));
+  assert.ok(messages.includes("本地回复完成"));
+  assert.ok(messages.includes("分支自己的问题"));
+  assert.equal(messages.includes("分支之后不应继承的标记"), false);
+  const reopenedSource = await f.host.conversation(source.id);
+  assert.ok(reopenedSource);
+  assert.deepEqual(await reopenedSource.entries({}, 20, undefined, BACKGROUND_CONTEXT), before);
+  const afterUsage = await f.request("conversation.usage", { conversationId: source.id });
+  assert.ok(afterUsage.success && originalUsage.success);
+  assert.deepEqual(afterUsage.result, originalUsage.result);
+  const childUsage = await f.request("conversation.usage", { conversationId: child.id });
+  assert.ok(childUsage.success);
+  assert.equal((childUsage.result.items as { totalTokens: number }[])[0]?.totalTokens, 17);
+});
+
+test("fork rejects invisible, foreign, unfinished entries and request conflicts without creating conversations", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const submitted = await f.request("conversation.chat.submit", f.input());
+  assert.ok(submitted.success);
+  await f.settled(submitted.result.submissionId);
+  const source = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(source);
+  const entries = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const assistant = entries.items.find((entry) => entry.kind === "pi.assistant");
+  const user = entries.items.find((entry) => entry.kind === "studio.chat-input");
+  assert.ok(assistant && user);
+  const createId = randomUUID();
+  const other = await createUserConversation(f.host.harness, createId, "Other");
+  const root = await f.host.root();
+  for (const conversationId of [root.id, 999999]) {
+    const result = await f.request("conversation.fork", { conversationId, entryId: assistant.id, requestId: randomUUID() });
+    assert.ok(!result.success);
+    assert.equal(result.error.code, "CONVERSATION_NOT_FOUND");
+  }
+  for (const input of [
+    { conversationId: other.id, entryId: assistant.id },
+    { conversationId: source.id, entryId: user.id },
+    { conversationId: source.id, entryId: 999999 },
+  ]) {
+    const result = await f.request("conversation.fork", { ...input, requestId: randomUUID() });
+    assert.ok(!result.success);
+    assert.equal(result.error.code, "FORK_ENTRY_INVALID");
+  }
+  for (const bad of [{ entryId: -1 }, { requestId: "bad" }, { apiKey: "synthetic" }]) {
+    const result = await f.request("conversation.fork", { conversationId: source.id, entryId: assistant.id, requestId: randomUUID(), ...bad });
+    assert.ok(!result.success);
+    assert.equal(result.error.code, "INVALID_PARAMS");
+  }
+  const conflict = await f.request("conversation.fork", { conversationId: source.id, entryId: assistant.id, requestId: createId });
+  assert.ok(!conflict.success);
+  assert.equal(conflict.error.code, "REQUEST_ID_CONFLICT");
+  const input = { conversationId: source.id, entryId: assistant.id, requestId: randomUUID() };
+  const fork = await f.request("conversation.fork", input);
+  assert.ok(fork.success);
+  const wrongEntry = await f.request("conversation.fork", { ...input, entryId: user.id });
+  assert.ok(!wrongEntry.success);
+  assert.equal(wrongEntry.error.code, "REQUEST_ID_CONFLICT");
+  const wrongOperation = await f.request("conversation.create", { requestId: input.requestId });
+  assert.ok(!wrongOperation.success);
+  assert.equal(wrongOperation.error.code, "REQUEST_ID_CONFLICT");
+  const child = fork.result.conversation as { id: number };
+  const nested = await f.request("conversation.fork", { conversationId: child.id, entryId: assistant.id, requestId: randomUUID() });
+  assert.ok(nested.success, "An inherited visible reply can be forked again");
+  const list = await f.request("conversation.list", {});
+  assert.ok(list.success);
+  assert.equal((list.result.items as unknown[]).length, 4, "Rejected attempts must not leave indexed or orphaned forks");
+  const records = await f.host.harness.commit((tx) => tx.scanConversations({}, 100), BACKGROUND_CONTEXT);
+  assert.equal(records.items.length, 5, "Four user conversations and one hidden root");
+});
+
+
+test("forking an earlier reply leaves the active source run alone and rejects aborted and post-boundary replies", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const first = await f.request("conversation.chat.submit", f.input());
+  assert.ok(first.success);
+  await f.settled(first.result.submissionId);
+  const source = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(source);
+  const initial = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const boundary = initial.items.find((entry) => entry.kind === "pi.assistant");
+  assert.ok(boundary);
+  f.setMode("slow");
+  const running = await f.request("conversation.chat.submit", f.input("原会话仍在生成"));
+  assert.ok(running.success);
+  const fork = await f.request("conversation.fork", { conversationId: source.id, entryId: boundary.id, requestId: randomUUID() });
+  assert.ok(fork.success);
+  const child = fork.result.conversation as { id: number };
+  const sourceStatus = await f.request("conversation.chat.status", { conversationId: source.id });
+  const childStatus = await f.request("conversation.chat.status", { conversationId: child.id });
+  assert.ok(sourceStatus.success && childStatus.success);
+  assert.equal(sourceStatus.result.running, true);
+  assert.equal(childStatus.result.running, false);
+  await f.request("conversation.chat.abort", { conversationId: source.id });
+  await f.settled(running.result.submissionId);
+  const stopped = await source.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const aborted = stopped.items.find((entry) => entry.kind === "pi.assistant" && entry.id > boundary.id);
+  if (aborted) {
+    const result = await f.request("conversation.fork", { conversationId: source.id, entryId: aborted.id, requestId: randomUUID() });
+    assert.ok(!result.success);
+    assert.equal(result.error.code, "FORK_ENTRY_INVALID");
+  }
+  f.setMode("success");
+  const later = await f.request("conversation.chat.submit", f.input("分支点之后的完整回复"));
+  assert.ok(later.success);
+  await f.settled(later.result.submissionId);
+  const latest = await source.entries({}, 1, undefined, BACKGROUND_CONTEXT);
+  assert.equal(latest.items[0]?.kind, "pi.assistant");
+  const invisible = await f.request("conversation.fork", { conversationId: child.id, entryId: latest.items[0]!.id, requestId: randomUUID() });
+  assert.ok(!invisible.success);
+  assert.equal(invisible.error.code, "FORK_ENTRY_INVALID", "Parent history after the fork boundary is invisible in the child");
+});

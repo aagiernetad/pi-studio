@@ -17,7 +17,7 @@ async function fixture(run, withChat = false) {
   try {
     await context.addInitScript((chat) => {
       const state = window.fixture = { calls: [], stored: {}, configs: {}, failSave: false, delay: 0,
-        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [], resetArgs: [],
+        entries: { 1: [], 2: [] }, statuses: {}, submissions: {}, submitArgs: [], resumeArgs: [], renameArgs: [], resetArgs: [], forkArgs: [], forks: {},
         usages: {}, conversations: chat ? [{ id: 1, title: "会话甲", createdAt: 1 }, { id: 2, title: "会话乙", createdAt: 2 }] : [] };
       const chatStatus = (id) => state.statuses[id] ??= { running: false, latestEntryId: null, partialText: "", model: null, failureReason: null, canResume: false, contextReset: false };
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
@@ -34,6 +34,23 @@ async function fixture(run, withChat = false) {
             const result = { items, nextBeforeId: all.length > items.length ? items.at(-1).id : null };
             if (args.beforeId && state.holdConversationPage) return new Promise(resolve => { state.releaseConversationPage = () => resolve(result); });
             return result;
+          }
+          if (command === "conversation_fork") {
+            const input = args.input;
+            state.forkArgs.push(structuredClone(input));
+            if (state.forks[input.requestId]) return { conversation: structuredClone(state.forks[input.requestId]) };
+            if (state.holdFork) await new Promise(resolve => { state.releaseFork = resolve; });
+            const source = state.conversations.find(item => item.id === input.conversationId);
+            const id = Math.max(0, ...state.conversations.map(item => item.id)) + 1;
+            const item = { id, title: source.title + '（分支）', createdAt: id,
+              forkedFrom: { conversationId: input.conversationId, entryId: input.entryId } };
+            state.conversations.unshift(item);
+            state.forks[input.requestId] = item;
+            state.entries[id] = structuredClone(state.entries[input.conversationId].filter(entry => entry.id <= input.entryId));
+            state.statuses[id] = { ...chatStatus(input.conversationId), running: false, failureReason: null, canResume: false,
+              latestEntryId: input.entryId, contextReset: false };
+            if (state.failForkOnce) { state.failForkOnce = false; throw 'IPC_TIMEOUT: synthetic-fork-private'; }
+            return { conversation: structuredClone(item) };
           }
           if (command === "conversation_rename") {
             state.renameArgs.push(structuredClone(args));
@@ -532,3 +549,66 @@ test("生成时禁止重置，切换会话后迟到重置不能影响新草稿�
   await chat.getByText('已开始新上下文。此前消息仍可在历史中查看。', { exact: true }).waitFor();
   assert.equal(await chat.getByRole('button', { name: '继续上次生成', exact: true }).count(), 0);
 }, true));
+
+
+test("fork UI keeps the same request after a lost reply and opens an independent conversation", async () => {
+  await fixture(async (page) => {
+    await page.evaluate(() => {
+      const f = window.fixture;
+      f.entries[1] = [
+        { id: 4, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [{ type: 'text', text: '稍后的回复' }], stopReason: 'stop' }] },
+        { id: 3, kind: 'studio.chat-input', data: null, model: [{ role: 'user', content: '稍后的问题' }] },
+        { id: 2, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [{ type: 'text', text: '原始回复' }], stopReason: 'stop' }] },
+        { id: 1, kind: 'studio.chat-input', data: null, model: [{ role: 'user', content: '原始问题' }] },
+      ];
+      f.statuses[1] = { running: false, model: { providerId: 'deepseek', modelId: 'deepseek-model' }, canResume: false };
+      f.failForkOnce = true;
+    });
+    await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+    const reply = page.locator('article').filter({ hasText: '原始回复' });
+    await reply.getByRole('button', { name: '从此处新建分支会话' }).click();
+    await page.getByRole('alert').filter({ hasText: '创建分支结果未确认' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '从此处新建分支会话' }).first().isDisabled(), true);
+    assert.equal((await page.locator('body').innerText()).includes('synthetic-fork-private'), false);
+    await page.getByRole('button', { name: '重试创建分支' }).click();
+    await page.locator('.conversation-item.active').filter({ hasText: '会话甲（分支）' }).waitFor();
+    await page.getByText('分支来自会话 #1 的回复 #2；用量仅统计此分支的新请求。', { exact: true }).waitFor();
+    await page.locator('.transcript-list').getByText('原始回复', { exact: true }).waitFor();
+    assert.equal(await page.locator('.transcript-list').getByText('稍后的回复', { exact: true }).count(), 0);
+    await page.waitForFunction(() => document.querySelector('[aria-label="对话模型"]')?.value === 'deepseek-model');
+    const result = await page.evaluate(() => ({ args: window.fixture.forkArgs, count: window.fixture.conversations.length,
+      source: window.fixture.entries[1].length, chatCalls: window.fixture.submitArgs.length }));
+    assert.deepEqual(result.args[0], result.args[1]);
+    assert.equal(result.count, 3);
+    assert.equal(result.source, 4);
+    assert.equal(result.chatCalls, 0);
+    await page.getByRole('button', { name: /^会话甲 #1/ }).click();
+    await page.locator('.transcript-list').getByText('稍后的回复', { exact: true }).waitFor();
+  }, true);
+});
+
+test("late fork result cannot switch the newly selected conversation and unfinished replies have no fork action", async () => {
+  await fixture(async (page) => {
+    await page.evaluate(() => {
+      const f = window.fixture;
+      f.holdFork = true;
+      f.entries[1] = [
+        { id: 2, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [{ type: 'text', text: '完整回复' }], stopReason: 'stop' }] },
+        { id: 3, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [{ type: 'text', text: '中断回复' }], stopReason: 'aborted' }] },
+      ];
+    });
+    await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+    await page.getByRole('button', { name: '从此处新建分支会话' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '从此处新建分支会话' }).count(), 1);
+    await page.getByRole('button', { name: '从此处新建分支会话' }).click();
+    await page.waitForFunction(() => typeof window.fixture.releaseFork === 'function');
+    await page.getByRole('button', { name: /^会话乙 #2/ }).click();
+    await page.getByLabel('消息内容').fill('会话乙保留的草稿');
+    await page.evaluate(() => window.fixture.releaseFork());
+    await page.waitForFunction(() => window.fixture.conversations.length === 3);
+    assert.ok((await page.locator('.conversation-item.active').innerText()).includes('会话乙'));
+    assert.equal(await page.getByLabel('消息内容').inputValue(), '会话乙保留的草稿');
+    await page.getByRole('button', { name: '刷新列表', exact: true }).click();
+    await page.getByRole('button', { name: /会话甲（分支）/ }).waitFor();
+  }, true);
+});

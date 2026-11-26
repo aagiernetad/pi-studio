@@ -3,6 +3,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   defineDoc,
   type Harness,
+  type ConversationId,
+  type EntryId,
 } from "@earendil-works/pi-durable";
 import { RuntimeApplicationError } from "../protocol/errors.js";
 
@@ -10,6 +12,7 @@ export type UserConversation  = {
   id: number;
   title: string;
   createdAt: number;
+  forkedFrom?: { conversationId: number; entryId: number };
 };
 
 type UserConversationIndex =  {
@@ -59,6 +62,10 @@ export async function createUserConversation(
 
       if (!existing) {
         throw new Error("Conversation index is inconsistent");
+      }
+
+      if (existing.forkedFrom) {
+        throw new RuntimeApplicationError("REQUEST_ID_CONFLICT", "Request ID belongs to another operation.");
       }
 
       return {
@@ -158,6 +165,50 @@ export async function renameUserConversation(
     }
     signal?.throwIfAborted();
     conversation.title = title;
-    return { id: conversation.id, title: conversation.title, createdAt: conversation.createdAt };
+    return { id: conversation.id, title: conversation.title, createdAt: conversation.createdAt,
+      ...(conversation.forkedFrom ? { forkedFrom: { ...conversation.forkedFrom } } : {}) };
+  }, BACKGROUND_CONTEXT);
+}
+
+/** 原生历史分支与用户索引在同一事务中创建，不复制消息或执行状态。 */
+export async function forkUserConversation(
+  harness: Harness,
+  conversationId: number,
+  entryId: number,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<UserConversation> {
+  return harness.commit(async (tx) => {
+    const index = await tx.doc(UserConversations);
+    const source = index.items[String(conversationId)];
+    if (!source || !await tx.conversation(conversationId as ConversationId)) {
+      throw new RuntimeApplicationError("CONVERSATION_NOT_FOUND", "Conversation does not exist or is not visible.");
+    }
+    const existingId = index.requests[requestId];
+    if (existingId !== undefined) {
+      const existing = index.items[String(existingId)];
+      if (!existing) throw new Error("Conversation index is inconsistent");
+      if (existing.forkedFrom?.conversationId !== conversationId || existing.forkedFrom.entryId !== entryId) {
+        throw new RuntimeApplicationError("REQUEST_ID_CONFLICT", "Request ID belongs to another fork or operation.");
+      }
+      return { id: existing.id, title: existing.title, createdAt: existing.createdAt,
+        forkedFrom: { conversationId, entryId } };
+    }
+    // 有界、fork-aware 查询同时排除其他会话和父分支截断点之后的 Entry。
+    const page = await tx.scanEntries({ conversationId: conversationId as ConversationId,
+      minEntryId: entryId as EntryId, maxEntryId: entryId as EntryId }, 1);
+    const entry = page.items[0];
+    if (entry?.kind !== "pi.assistant" || !entry.model?.some((message) =>
+      message.role === "assistant" && (message.stopReason === "stop" || message.stopReason === "length"))) {
+      throw new RuntimeApplicationError("FORK_ENTRY_INVALID", "Choose a completed assistant reply visible in this conversation.");
+    }
+    signal?.throwIfAborted();
+    const created = await tx.forkConversation(conversationId as ConversationId, entryId as EntryId,
+      { ownership: { kind: "ownerless" } });
+    const conversation: UserConversation = { id: created.id, title: source.title.slice(0, 116) + "（分支）",
+      createdAt: Date.now(), forkedFrom: { conversationId, entryId } };
+    index.items[String(created.id)] = conversation;
+    index.requests[requestId] = created.id;
+    return conversation;
   }, BACKGROUND_CONTEXT);
 }
