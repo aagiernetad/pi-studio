@@ -24,7 +24,7 @@ type ConversationCreateResult = {
 
 const PAGE_SIZE = 20;
 
-export default function ConversationPanel() {
+export default function ConversationPanel({ catalogRevision = 0 }: { catalogRevision?: number }) {
   const [conversations, setConversations] = useState<
     UserConversation[]
   >([]);
@@ -309,7 +309,7 @@ export default function ConversationPanel() {
               </p>
 
               {selected.forkedFrom && <p className="muted">分支来自会话 #{selected.forkedFrom.conversationId} 的回复 #{selected.forkedFrom.entryId}；用量仅统计此分支的新请求。</p>}
-              <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id}
+              <ConversationChat key={`chat-${selected.id}`} conversationId={selected.id} catalogRevision={catalogRevision}
                 onEntriesChanged={() => setTranscriptRevision((value) => value + 1)} />
               <ConversationUsage key={`usage-${selected.id}`} conversationId={selected.id} revision={transcriptRevision} />
               <ConversationTranscript

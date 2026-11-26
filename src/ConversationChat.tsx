@@ -27,8 +27,8 @@ function message(cause: unknown): string {
 }
 const rejected = (cause: unknown) => typeof cause === "string" && /^(INVALID_PARAMS|MODEL_NOT_FOUND|PROVIDER_NOT_CONFIGURED|CHAT_UNSUPPORTED|CONVERSATION_BUSY|CONVERSATION_NOT_FOUND|REQUEST_ID_CONFLICT|CHAT_NOT_RESUMABLE|CREDENTIAL_STORE_UNAVAILABLE):/.test(cause);
 
-export default function ConversationChat({ conversationId, onEntriesChanged }: {
-  conversationId: number; onEntriesChanged: () => void;
+export default function ConversationChat({ conversationId, onEntriesChanged, catalogRevision = 0 }: {
+  conversationId: number; onEntriesChanged: () => void; catalogRevision?: number;
 }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [providerId, setProviderId] = useState("");
@@ -67,7 +67,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
         (catalog.items.find((item) => item.id === "deepseek")?.id ?? catalog.items[0]?.id ?? ""));
     }).catch(() => { if (active) setCatalogError("服务商目录读取失败，请刷新模型目录。"); });
     return () => { active = false; };
-  }, [revision]);
+  }, [revision, catalogRevision]);
   useEffect(() => {
     if (!providerId) return;
     let active = true;
@@ -83,7 +83,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged }: {
     }).catch(() => { if (active) setCatalogError("模型目录读取失败，请刷新模型目录。"); })
       .finally(() => { if (active) setModelsLoading(false); });
     return () => { active = false; };
-  }, [providerId, revision]);
+  }, [providerId, revision, catalogRevision]);
 
   useEffect(() => {
     let active = true;

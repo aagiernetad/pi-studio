@@ -168,14 +168,14 @@ function ProviderEditor({ provider, onBusy }: { provider: Provider; onBusy: (bus
   );
 }
 
-export default function ProviderSettings() {
+export default function ProviderSettings({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [providerId, setProviderId] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [managing, setManaging] = useState(false);
   const [configNotice, setConfigNotice] = useState("");
   useEffect(() => {
@@ -192,10 +192,11 @@ export default function ProviderSettings() {
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [revision]);
+  function handleBusy(next: boolean) { setBusy(next); onBusyChange?.(next); }
   const provider = providers.find((item) => item.id === providerId);
   return (
     <section className="panel provider-settings" aria-labelledby="provider-heading">
-      <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary id="provider-heading">服务商设置</summary>
         <p className="muted">管理服务商密钥并检查模型连接。</p>
         <div className="provider-actions">
@@ -215,9 +216,9 @@ export default function ProviderSettings() {
         </div>
         {loading && <p className="muted">正在读取服务商列表...</p>}
         {error && <div className="error" role="alert">{error}</div>}
-        {(expanded || busy) && !loading && !error && provider && <ProviderEditor key={provider.id} provider={provider} onBusy={setBusy} />}
+        {(expanded || busy) && !loading && !error && provider && <ProviderEditor key={provider.id} provider={provider} onBusy={handleBusy} />}
         </>}
-        {managing && (expanded || busy) && <CustomProviderSettings onBusy={setBusy} onSaved={(id) => {
+        {managing && (expanded || busy) && <CustomProviderSettings onBusy={handleBusy} onSaved={(id) => {
           setProviderId(id ?? "deepseek");
           setRevision((value) => value + 1);
           setManaging(false);

@@ -30,7 +30,20 @@ interface RuntimeEvent {
 
 type RuntimeStatus = "checking" | "online" | "offline";
 
+type StudioPage = "conversations" | "providers" | "diagnostics";
+
 function App() {
+  const [page, setPage] = useState<StudioPage>("conversations");
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  useEffect(() => { window.scrollTo(0, 0); }, [page]);
+
+  function navigate(next: StudioPage) {
+    if (settingsBusy || next === page) return;
+    if (page === "providers") setCatalogRevision((value) => value + 1);
+    setPage(next);
+  }
+
   const [status, setStatus] =
     useState<RuntimeStatus>("checking");
 
@@ -131,21 +144,43 @@ function App() {
       <header className="header">
         <div>
           <h1>Pi Studio</h1>
-          <p>Local-first Agent Runtime</p>
+          <p>本地优先的智能工作空间</p>
         </div>
 
         <div className={`status ${status}`}>
           <span className="status-dot" />
           {status === "online"
-            ? "Runtime Online"
+            ? "运行时已连接"
             : status === "checking"
-              ? "Connecting..."
-              : "Runtime Offline"}
+              ? "正在连接运行时"
+              : "运行时未连接"}
         </div>
       </header>
 
-      <ConversationPanel />
-      <ProviderSettings />
+      <nav className="studio-navigation" aria-label="工作区导航">
+        {([
+          ["conversations", "会话", "studio-conversations"],
+          ["providers", "服务商", "studio-providers"],
+          ["diagnostics", "诊断", "studio-diagnostics"],
+        ] as const).map(([key, label, target]) => <button key={key} type="button"
+          aria-current={page === key ? "page" : undefined} aria-controls={target}
+          disabled={settingsBusy} onClick={() => navigate(key)}>{label}</button>)}
+      </nav>
+
+      <section id="studio-conversations" aria-labelledby="conversations-heading" hidden={page !== "conversations"}>
+        <div className="workspace-heading"><h2 id="conversations-heading">会话工作台</h2>
+          <p className="muted">继续已有会话，或新建会话开始一个方向。</p></div>
+        <ConversationPanel catalogRevision={catalogRevision} />
+      </section>
+      <section id="studio-providers" aria-labelledby="providers-heading" hidden={page !== "providers"}>
+        <div className="workspace-heading"><h2 id="providers-heading">服务商与模型</h2>
+          <p className="muted">配置模型服务商、管理凭据并测试连接。</p></div>
+        {page === "providers" && <ProviderSettings onBusyChange={setSettingsBusy} />}
+        {settingsBusy && <p className="muted" role="status">正在处理服务商操作，完成后可切换页面。</p>}
+      </section>
+      <section id="studio-diagnostics" aria-labelledby="diagnostics-heading" hidden={page !== "diagnostics"}>
+        <div className="workspace-heading"><h2 id="diagnostics-heading">运行诊断</h2>
+          <p className="muted">检查运行时连接、通信与最近事件。</p></div>
 
       <section className="panel">
         <div className="section-heading">
@@ -246,8 +281,10 @@ function App() {
         )}
       </section>
 
+      </section>
+
       <footer>
-        Pi Studio · Runtime IPC Protocol V1
+        Pi Studio · 本地工作空间
       </footer>
     </main>
   );

@@ -537,3 +537,14 @@ footer {
 .usage-table td:first-child { min-width: 140px; overflow-wrap: anywhere; }
 .usage-table td:not(:first-child) { white-space: nowrap; }
 .usage-table small { display: block; margin-top: 6px; color: #96a2b2; }
+
+/* 工作区导航：隐藏页面保留会话组件及正在进行的请求。 */
+[hidden] { display: none !important; }
+.studio-navigation { position: sticky; top: 12px; z-index: 10; display: flex; flex-wrap: wrap; gap: 8px; padding: 6px; margin-bottom: 24px; background: #141a21; border: 1px solid #303946; border-radius: 10px; }
+.studio-navigation button { min-width: 96px; border-color: transparent; background: transparent; }
+.studio-navigation button[aria-current="page"] { color: #eef5ff; background: #23344c; border-color: #45658a; }
+.studio-navigation button:focus-visible { outline: 2px solid #6c9dff; outline-offset: 2px; }
+.workspace-heading { margin: 0 0 20px; }
+.workspace-heading h2 { font-size: 22px; margin-bottom: 6px; }
+.workspace-heading p { margin: 0; }
+@media (max-width: 600px) { .studio-navigation button { flex: 1; min-width: 0; padding-inline: 10px; } }

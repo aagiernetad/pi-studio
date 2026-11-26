@@ -27,6 +27,7 @@ async function fixture(run, withChat = false) {
           state.calls.push(command);
           if (command.startsWith("plugin:event|")) return 1;
           if (command === "plugin:opener|open_url") { state.openedUrl = args.url; return; }
+          if (command === "runtime_ping") return { message: args.message, runtime: "test", pid: 1 };
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
           if (command === "conversation_list") {
             const all = state.conversations.filter(item => (!args.beforeId || item.id < args.beforeId) && item.title.toLowerCase().includes((args.query ?? '').toLowerCase()));
@@ -157,9 +158,14 @@ async function fixture(run, withChat = false) {
     }, withChat);
     const page = await context.newPage();
     await page.goto(url);
-    await page.getByText("服务商设置", { exact: true }).click();
-    await page.getByLabel("API Key", { exact: true }).waitFor();
-    await page.waitForFunction(() => !document.querySelector('.provider-editor[aria-busy="true"]'));
+    if (withChat) {
+      await page.getByLabel("消息内容", { exact: true }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+    } else {
+      await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "服务商", exact: true }).click();
+      await page.getByLabel("API Key", { exact: true }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('.provider-editor[aria-busy="true"]'));
+    }
     await run(page, page.locator(".provider-settings"));
   } finally { await context.close(); }
 }
@@ -612,3 +618,87 @@ test("late fork result cannot switch the newly selected conversation and unfinis
     await page.getByRole('button', { name: /会话甲（分支）/ }).waitFor();
   }, true);
 });
+
+
+test("工作区默认进入会话，导航保留草稿并让运行诊断独立可用", async () => fixture(async (page) => {
+  const nav = page.getByRole('navigation', { name: '工作区导航' });
+  assert.equal(await nav.getByRole('button', { name: '会话', exact: true }).getAttribute('aria-current'), 'page');
+  assert.equal(await page.getByRole('heading', { name: 'IPC 通信测试', exact: true }).isVisible(), false);
+  assert.equal(await page.locator('.provider-settings').count(), 0);
+  await page.getByLabel('消息内容', { exact: true }).fill('跨页面保留的草稿');
+  await nav.getByRole('button', { name: '诊断', exact: true }).click();
+  await page.getByRole('heading', { name: '运行诊断', exact: true }).waitFor();
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).isVisible(), false);
+  await page.getByPlaceholder('输入 Ping 消息').fill('导航通信验收');
+  await page.getByRole('button', { name: '发送 Ping', exact: true }).click();
+  await page.locator('.result').filter({ hasText: '导航通信验收' }).waitFor();
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '跨页面保留的草稿');
+  assert.ok((await page.locator('.conversation-item.active').innerText()).includes('会话甲'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.scrollTo(0, 400));
+  const box = await nav.boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390 && box.y >= 0);
+  await nav.getByRole('button', { name: '服务商', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByLabel('API Key', { exact: true }).waitFor();
+}, true));
+
+test("离开设置清除未保存密钥，保存期间阻止导航，完成后可安全切换", async () => fixture(async (page, panel) => {
+  const nav = page.getByRole('navigation', { name: '工作区导航' });
+  await panel.getByLabel('API Key', { exact: true }).fill('synthetic-unsaved-navigation-key');
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  assert.equal(await page.locator('input[type="password"]').count(), 0);
+  await nav.getByRole('button', { name: '服务商', exact: true }).click();
+  await panel.getByLabel('API Key', { exact: true }).waitFor();
+  assert.equal(await panel.getByLabel('API Key', { exact: true }).inputValue(), '');
+  await page.evaluate(() => { window.fixture.holdSave = true; });
+  await panel.getByLabel('API Key', { exact: true }).fill('synthetic-saved-navigation-key');
+  await panel.getByRole('button', { name: '保存 API Key', exact: true }).click();
+  await page.waitForFunction(() => typeof window.fixture.releaseSave === 'function');
+  assert.equal(await nav.getByRole('button', { name: '会话', exact: true }).isDisabled(), true);
+  assert.equal(await nav.getByRole('button', { name: '诊断', exact: true }).isDisabled(), true);
+  await page.evaluate(() => window.fixture.releaseSave());
+  await panel.getByText('API Key 已保存到 Windows 凭据管理器。', { exact: true }).waitFor();
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  await nav.getByRole('button', { name: '服务商', exact: true }).click();
+  await panel.getByText('已保存 API Key', { exact: false }).waitFor();
+  assert.equal(await panel.getByLabel('API Key', { exact: true }).inputValue(), '');
+  assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
+}));
+
+test("返回会话刷新模型目录，页面切换保留生成与未确认消息的幂等请求", async () => fixture(async (page) => {
+  const nav = page.getByRole('navigation', { name: '工作区导航' });
+  await page.getByLabel('消息内容', { exact: true }).fill('保留目录刷新草稿');
+  await nav.getByRole('button', { name: '服务商', exact: true }).click();
+  await page.getByRole('button', { name: '自定义配置', exact: true }).click();
+  await page.getByLabel('配置标识', { exact: true }).fill('custom-navigation');
+  await page.getByLabel('显示名称', { exact: true }).fill('导航新模型');
+  await page.getByLabel('API 基础地址', { exact: true }).fill('https://model.example.test/v1');
+  await page.getByLabel('模型 ID', { exact: true }).fill('new-model');
+  await page.getByRole('button', { name: '保存配置', exact: true }).click();
+  await page.getByText('配置已保存，可设置 API Key 并测试连接。', { exact: true }).waitFor();
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  await page.waitForFunction(() => !!document.querySelector('[aria-label="对话服务商"] option[value="custom-navigation"]'));
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '保留目录刷新草稿');
+  await page.evaluate(() => { window.fixture.failSubmitOnce = true; });
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.getByRole('button', { name: '重试同一请求', exact: true }).waitFor();
+  await nav.getByRole('button', { name: '诊断', exact: true }).click();
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  await page.getByRole('button', { name: '重试同一请求', exact: true }).click();
+  await page.locator('.transcript-list').getByText('本地页面回复', { exact: true }).waitFor();
+  const args = await page.evaluate(() => window.fixture.submitArgs);
+  assert.equal(args[0].requestId, args[1].requestId);
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+  await page.evaluate(() => { window.fixture.slowChat = true; });
+  await page.getByLabel('消息内容', { exact: true }).fill('切换页面不中断生成');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await page.getByText('正在生成回复...', { exact: true }).waitFor();
+  await nav.getByRole('button', { name: '服务商', exact: true }).click();
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  await page.getByText('正在生成回复...', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.fixture.calls.filter(item => item === 'conversation_chat_abort').length), 0);
+  await page.getByRole('button', { name: '停止生成', exact: true }).click();
+  await page.getByRole('button', { name: '继续上次生成', exact: true }).waitFor();
+}, true));
