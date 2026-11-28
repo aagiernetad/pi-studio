@@ -393,6 +393,64 @@ test("历史思考与正文分开展示，遮蔽内容、签名和失败文本�
   for (const hidden of ['遮蔽的思考', 'opaque-history-signature', 'opaque-redacted-signature', '失败时的私密文本']) assert.equal(visible.includes(hidden), false);
 }, true));
 
+test("回复统计使用原生请求耗时和输出量，复制正文不夹带统计或推理计数", async () => fixture(async page => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.evaluate(() => {
+    window.fixture.entries[1] = [{ id: 1, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', stopReason: 'stop',
+      durationMs: 1250, usage: { input: 100, output: 8, reasoning: 3 }, content: [{ type: 'text', text: '带有真实统计的回复' }] }] }];
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const history = page.locator('.transcript-list');
+  const metrics = history.getByLabel('本次请求统计', { exact: true });
+  await metrics.getByText('耗时 1.3 秒', { exact: true }).waitFor();
+  assert.equal((await metrics.innerText()).includes('输出 8 tokens'), true);
+  assert.equal((await metrics.innerText()).includes('11 tokens'), false);
+  await history.getByRole('button', { name: '复制回复', exact: true }).click();
+  await history.getByText('已复制', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '带有真实统计的回复');
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.setViewportSize({ width: 320, height: 650 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await metrics.isVisible(), true);
+  }
+}, true));
+
+test("缺失或无效计量不伪造耗时和零用量，失败与停止回复不显示成功统计", async () => fixture(async page => {
+  await page.evaluate(() => {
+    const entry = (id, durationMs, output, stopReason = 'stop') => ({ id, kind: 'pi.assistant', data: null,
+      model: [{ role: 'assistant', content: [{ type: 'text', text: `计量边界 ${id}` }], stopReason, durationMs, usage: { output } }] });
+    window.fixture.entries[1] = [entry(1, undefined, undefined), entry(2, -1, 0), entry(3, NaN, -5), entry(4, Infinity, 1.5),
+      entry(5, 500, 5, 'error'), entry(6, 500, 5, 'aborted'), entry(7, 0, 0), entry(8, undefined, 9), entry(9, 250, undefined, 'length')];
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const history = page.locator('.transcript-list');
+  await history.getByText('计量边界 9', { exact: true }).waitFor();
+  for (const id of [1, 2, 3, 4, 5, 6]) assert.equal(await history.locator(`[data-entry-id="${id}"] .response-metrics`).count(), 0);
+  assert.equal(await history.locator('[data-entry-id="7"] .response-metrics').innerText(), '耗时 <1 毫秒');
+  assert.equal(await history.locator('[data-entry-id="8"] .response-metrics').innerText(), '输出 9 tokens');
+  assert.equal(await history.locator('[data-entry-id="9"] .response-metrics').innerText(), '耗时 250 毫秒');
+}, true));
+
+test("模型选择不改写历史计量，重新打开会话仍显示对应回复的数据", async () => fixture(async page => {
+  await page.evaluate(() => {
+    const entry = (id, durationMs) => ({ id, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', stopReason: 'stop',
+      content: [{ type: 'text', text: `独立计量 ${id}` }], durationMs, usage: { output: id } }] });
+    window.fixture.entries[1] = [entry(1, 250)]; window.fixture.entries[2] = [entry(2, 2500)];
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  await page.getByLabel('本次请求统计', { exact: true }).getByText('耗时 250 毫秒', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '选择模型', exact: true }).click();
+  await page.getByRole('combobox', { name: '对话服务商', exact: true }).selectOption('other');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.getByLabel('本次请求统计', { exact: true }).innerText(), '耗时 250 毫秒\n输出 1 tokens');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.getByLabel('本次请求统计', { exact: true }).getByText('耗时 2.5 秒', { exact: true }).waitFor();
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  await page.getByLabel('本次请求统计', { exact: true }).getByText('耗时 250 毫秒', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.fixture.calls.includes('conversation_chat_submit')), false);
+}, true));
+
 test("切换会话后迟到思考流不串入新会话，返回可读取原生实时状态", async () => fixture(async page => {
   await page.evaluate(() => { Object.assign(window.fixture.statuses[1], { running: true, phase: 'thinking', partialThinking: '会话甲独有思考' }); });
   await page.getByText('正在思考...', { exact: true }).waitFor();

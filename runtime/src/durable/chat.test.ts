@@ -189,6 +189,13 @@ test("native streamed thinking is bounded, excludes redacted payloads and surviv
   const history = await f.request("conversation.entries", { conversationId: f.conversation.id });
   assert.ok(history.success);
   assert.ok(JSON.stringify(history.result).includes(thinking), "preview limits do not truncate Durable history");
+  const conversation = await f.host.conversation(f.conversation.id as ConversationId);
+  assert.ok(conversation);
+  const nativeHistory = await conversation.entries({}, 20, undefined, BACKGROUND_CONTEXT);
+  const assistant = nativeHistory.items.flatMap(entry => entry.model ?? []).find(message => message.role === "assistant");
+  assert.ok(assistant?.role === "assistant");
+  assert.ok(typeof assistant.durationMs === "number" && Number.isFinite(assistant.durationMs) && assistant.durationMs >= 0,
+    "the native stream duration is preserved through policy forwarding, Durable storage and reopen");
   assert.equal(f.calls.length, 1);
 });
 

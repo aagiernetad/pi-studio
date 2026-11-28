@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import ChatMessage from "./ChatMessage";
 import StudioIcon from "./StudioIcon";
 import ThinkingBlock from "./ThinkingBlock";
+import ResponseMetrics from "./ResponseMetrics";
 
 type TranscriptEntry = {
   id: number;
@@ -315,6 +316,8 @@ export default function ConversationTranscript({
               {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
                 <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
                 entry.kind === "pi.assistant" && modelThinking(entry.model) ? null : <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
+
+              {entry.kind === "pi.assistant" && <ResponseMetrics messages={entry.model} />}
 
               {onForked && entry.kind === "pi.assistant" && Array.isArray(entry.model) && entry.model.some((message: unknown) => {
                 if (!message || typeof message !== "object") return false;
