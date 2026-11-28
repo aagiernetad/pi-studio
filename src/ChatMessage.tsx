@@ -3,7 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label }: { text: string; label: string }) {
   const mounted = useRef(false);
   const working = useRef(false);
   const [result, setResult] = useState<{ text: string; state: "pending" | "copied" | "error" } | null>(null);

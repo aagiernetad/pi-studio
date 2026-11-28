@@ -1,7 +1,8 @@
-type IconName = "conversations" | "providers" | "diagnostics" | "send" | "sun" | "moon" | "appearance" | "chevron" | "outline" | "edit" | "search";
+type IconName = "conversations" | "workspace" | "providers" | "diagnostics" | "send" | "sun" | "moon" | "appearance" | "chevron" | "outline" | "edit" | "search";
 
 const paths: Record<IconName, string> = {
   conversations: "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z M7 9h10 M7 13h6",
+  workspace: "M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z M3 9h18",
   providers: "M8 3v4 M16 3v4 M5 7h14v3a7 7 0 0 1-14 0V7Z M12 17v4",
   diagnostics: "M3 12h4l3-7 4 14 3-7h4",
   sun: "M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1.5 1.5 M17.5 17.5L19 19 M5 19l1.5-1.5 M17.5 6.5L19 5",

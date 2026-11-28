@@ -29,6 +29,38 @@ async function fixture(run, withChat = false) {
           if (command === "plugin:opener|open_url") { state.openedUrl = args.url; return; }
           if (command === "runtime_ping") return { message: args.message, runtime: "test", pid: 1 };
           if (command === "runtime_info") return { name: "test", platform: "test", nodeVersion: "test", pid: 1, uptime: 0 };
+          if (command === "workspace_state") return { workspace: structuredClone(state.workspace ?? null) };
+          if (command === "workspace_choose") {
+            state.chooseArgs ??= []; state.chooseArgs.push(structuredClone(args));
+            if (state.cancelWorkspace) return { cancelled: true };
+            state.workspace = state.nextWorkspace ?? { id: 'workspace-one', name: '示例项目' };
+            if (state.loseWorkspaceChoice) { state.loseWorkspaceChoice = false; throw 'IPC_TIMEOUT: synthetic-workspace-private'; }
+            return { workspace: structuredClone(state.workspace) };
+          }
+          if (command === "workspace_close") {
+            state.workspace = null;
+            if (state.loseWorkspaceClose) { state.loseWorkspaceClose = false; throw 'IPC_TIMEOUT: synthetic-close-private'; }
+            return { closed: true };
+          }
+          if (command === "workspace_list") {
+            const result = { workspaceId: args.input.workspaceId, path: args.input.path, truncated: !!state.workspaceTruncated,
+              items: structuredClone(state.workspaceItems?.[args.input.path] ?? [
+                { name: 'docs', path: 'docs', kind: 'directory', previewable: false },
+                { name: 'README.md', path: 'README.md', kind: 'file', previewable: true },
+                { name: 'app.exe', path: 'app.exe', kind: 'file', previewable: false },
+              ]) };
+            if (state.failWorkspaceList) throw 'INTERNAL_ERROR: synthetic-path-private';
+            if (state.holdWorkspaceList === args.input.path) return new Promise(resolve => { state.releaseWorkspaceList = () => resolve(result); });
+            return result;
+          }
+          if (command === "workspace_read") {
+            const text = state.fileContents?.[args.input.path] ?? '# 本地文件预览';
+            const result = { workspaceId: args.input.workspaceId, path: args.input.path, name: args.input.path.split('/').at(-1),
+              bytes: new TextEncoder().encode(text).length, text };
+            if (state.failWorkspaceRead) throw 'WORKSPACE_FILE_TOO_LARGE: synthetic-path-private';
+            if (state.holdWorkspaceRead === args.input.path) return new Promise(resolve => { state.releaseWorkspaceRead = () => resolve(result); });
+            return result;
+          }
           if (command === "conversation_create") {
             state.created ??= {};
             if (state.created[args.requestId]) return { conversation: structuredClone(state.created[args.requestId]) };
@@ -205,6 +237,103 @@ async function fixture(run, withChat = false) {
     await run(page, page.locator(".provider-settings"));
   } finally { await context.close(); }
 }
+
+test("工作区选择、目录导航与纯文本预览接入现有桌面，关闭后清除内容", async () => fixture(async page => {
+  await page.getByRole('navigation', { name: '工作区导航', exact: true }).getByRole('button', { name: '工作区', exact: true }).click();
+  const workspace = page.locator('.file-workspace');
+  await workspace.getByRole('button', { name: '选择目录', exact: true }).click();
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).waitFor();
+  assert.equal(await workspace.getByRole('button', { name: 'app.exe', exact: true }).isDisabled(), true);
+  await page.evaluate(() => {
+    fixture.workspaceItems = { docs: [{ name: 'guide.md', path: 'docs/guide.md', kind: 'file', previewable: true }] };
+    fixture.fileContents = { 'docs/guide.md': '<img src="https://invalid.example/file"><script>window.unsafeFile = true</script>\n文件正文' };
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { fixture.copiedFile = text; } } });
+  });
+  await workspace.getByRole('button', { name: 'docs', exact: true }).click();
+  await workspace.getByRole('button', { name: 'guide.md', exact: true }).click();
+  await workspace.getByLabel('文件内容', { exact: true }).waitFor();
+  assert.ok((await workspace.getByLabel('文件内容', { exact: true }).innerText()).includes('<script>'));
+  assert.equal(await workspace.locator('img,script').count(), 0);
+  assert.equal(await page.evaluate(() => window.unsafeFile), undefined);
+  await workspace.getByRole('button', { name: '复制文件内容', exact: true }).click();
+  assert.equal(await page.evaluate(() => fixture.copiedFile === fixture.fileContents['docs/guide.md']), true);
+  assert.deepEqual(await page.evaluate(() => fixture.chooseArgs), [{}]);
+  assert.equal(await page.evaluate(() => fixture.calls.includes('conversation_chat_submit')), false);
+  assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
+  await workspace.getByRole('button', { name: '关闭工作区', exact: true }).click();
+  await workspace.getByText('选择一个工作目录', { exact: true }).waitFor();
+  assert.equal(await workspace.getByLabel('文件内容', { exact: true }).count(), 0);
+}, true));
+
+test("工作区旧文件和旧目录的迟到结果不能覆盖当前预览或新目录", async () => fixture(async page => {
+  await page.getByRole('navigation', { name: '工作区导航', exact: true }).getByRole('button', { name: '工作区', exact: true }).click();
+  const workspace = page.locator('.file-workspace');
+  await workspace.getByRole('button', { name: '选择目录', exact: true }).click();
+  await page.evaluate(() => { fixture.holdWorkspaceRead = 'README.md'; fixture.fileContents = { 'README.md': '迟到文件标记' }; });
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).click();
+  await page.waitForFunction(() => typeof fixture.releaseWorkspaceRead === 'function');
+  await page.evaluate(() => { fixture.workspaceItems = { docs: [{ name: 'new.md', path: 'docs/new.md', kind: 'file', previewable: true }] }; });
+  await workspace.getByRole('button', { name: 'docs', exact: true }).click();
+  await workspace.getByRole('button', { name: 'new.md', exact: true }).click();
+  await workspace.getByLabel('文件内容', { exact: true }).waitFor();
+  await page.evaluate(() => fixture.releaseWorkspaceRead());
+  assert.equal(await workspace.getByLabel('文件内容', { exact: true }).innerText(), '# 本地文件预览');
+  await page.evaluate(() => { fixture.holdWorkspaceList = ''; });
+  await workspace.getByRole('navigation', { name: '目录位置' }).getByRole('button', { name: '示例项目', exact: true }).click();
+  await page.waitForFunction(() => typeof fixture.releaseWorkspaceList === 'function');
+  await page.evaluate(() => { fixture.holdWorkspaceList = null; fixture.nextWorkspace = { id: 'workspace-two', name: '另一个项目' }; });
+  await workspace.getByRole('button', { name: '切换目录', exact: true }).click();
+  await workspace.getByRole('navigation', { name: '目录位置' }).getByRole('button', { name: '另一个项目', exact: true }).waitFor();
+  await page.evaluate(() => fixture.releaseWorkspaceList());
+  assert.equal(await workspace.getByRole('navigation', { name: '目录位置' }).getByRole('button', { name: '示例项目', exact: true }).count(), 0);
+  assert.equal(await workspace.getByLabel('文件内容', { exact: true }).count(), 0);
+}, true));
+
+test("取消目录选择保留预览，未知结果从 Node 状态恢复且错误不泄露原始路径", async () => fixture(async page => {
+  await page.getByRole('navigation', { name: '工作区导航', exact: true }).getByRole('button', { name: '工作区', exact: true }).click();
+  const workspace = page.locator('.file-workspace');
+  await page.evaluate(() => { fixture.loseWorkspaceChoice = true; });
+  await workspace.getByRole('button', { name: '选择目录', exact: true }).click();
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).waitFor();
+  assert.equal((await workspace.innerText()).includes('synthetic-workspace-private'), false);
+  assert.equal(await workspace.locator(':scope > [role="alert"]').count(), 0);
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).click();
+  await workspace.getByLabel('文件内容', { exact: true }).waitFor();
+  await page.evaluate(() => { fixture.cancelWorkspace = true; });
+  await workspace.getByRole('button', { name: '切换目录', exact: true }).click();
+  assert.equal(await workspace.getByLabel('文件内容', { exact: true }).innerText(), '# 本地文件预览');
+  await page.evaluate(() => { fixture.failWorkspaceRead = true; });
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).click();
+  await workspace.getByText('文件超过 64 KiB，暂不支持预览。', { exact: true }).waitFor();
+  assert.equal((await workspace.innerText()).includes('synthetic-path-private'), false);
+  await page.evaluate(() => { fixture.loseWorkspaceClose = true; });
+  await workspace.getByRole('button', { name: '关闭工作区', exact: true }).click();
+  await workspace.getByText('选择一个工作目录', { exact: true }).waitFor();
+  assert.equal(await workspace.locator(':scope > [role="alert"]').count(), 0);
+}, true));
+
+test("工作区保留聊天草稿，深浅与窄窗均可浏览预览，目录失败可重试", async () => fixture(async page => {
+  await page.getByLabel('消息内容', { exact: true }).fill('原会话草稿');
+  const nav = page.getByRole('navigation', { name: '工作区导航', exact: true });
+  await nav.getByRole('button', { name: '工作区', exact: true }).click();
+  const workspace = page.locator('.file-workspace');
+  await page.evaluate(() => { fixture.failWorkspaceList = true; });
+  await workspace.getByRole('button', { name: '选择目录', exact: true }).click();
+  await workspace.getByRole('button', { name: '重试目录', exact: true }).waitFor();
+  await page.evaluate(() => { fixture.failWorkspaceList = false; fixture.workspaceTruncated = true; });
+  await workspace.getByRole('button', { name: '重试目录', exact: true }).click();
+  await workspace.getByRole('button', { name: 'README.md', exact: true }).click();
+  await workspace.getByLabel('文件内容', { exact: true }).waitFor();
+  await workspace.getByText('目录较大，仅显示部分文件（最多 200 项）。', { exact: true }).waitFor();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await workspace.getByLabel('文件内容', { exact: true }).isVisible(), true);
+  }
+  await nav.getByRole('button', { name: '会话', exact: true }).click();
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '原会话草稿');
+}, true));
 
 test("保存、测试和删除凭据，密钥清空且不进入浏览器持久存储", async () => fixture(async (page, panel) => {
   const key = panel.getByLabel("API Key", { exact: true });

@@ -6,6 +6,7 @@ import ConversationPanel from "./ConversationPanel";
 import ProviderSettings from "./ProviderSettings";
 import StudioIcon from "./StudioIcon";
 import AppearanceSettings from "./AppearanceSettings";
+import WorkspaceBrowser from "./WorkspaceBrowser";
 import { APPEARANCE_KEY, loadAppearance, type Appearance, type ThemeMode } from "./appearance";
 import "./App.css";
 import "./workspace.css";
@@ -34,7 +35,7 @@ interface RuntimeEvent {
 
 type RuntimeStatus = "checking" | "online" | "offline";
 
-type StudioPage = "conversations" | "providers" | "appearance" | "diagnostics";
+type StudioPage = "conversations" | "workspace" | "providers" | "appearance" | "diagnostics";
 
 type Theme = "light" | "dark";
 const THEME_KEY = "pi-studio.theme";
@@ -225,6 +226,7 @@ function App() {
       <nav className="studio-navigation" aria-label="工作区导航">
         {([
           ["conversations", "会话", "studio-conversations"],
+          ["workspace", "工作区", "studio-workspace"],
           ["providers", "服务商", "studio-providers"],
           ["appearance", "外观", "studio-appearance"],
           ["diagnostics", "诊断", "studio-diagnostics"],
@@ -243,6 +245,7 @@ function App() {
         <h2 id="conversations-heading" className="sr-only">会话工作台</h2>
         <ConversationPanel catalogRevision={catalogRevision} onOpenProviders={() => navigate("providers")} onOpenAppearance={() => navigate("appearance")} />
       </section>
+      <section id="studio-workspace" hidden={page !== "workspace"} aria-label="工作区"><WorkspaceBrowser /></section>
       <section id="studio-providers" aria-labelledby="providers-heading" hidden={page !== "providers"}>
         <div className="workspace-heading"><h2 id="providers-heading">服务商与模型</h2></div>
         {page === "providers" && <ProviderSettings onBusyChange={setSettingsBusy} />}

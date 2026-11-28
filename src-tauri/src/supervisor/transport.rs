@@ -431,6 +431,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    #[tokio::test]
+    async fn should_preview_only_the_selected_workspace_over_real_ipc() {
+        let data_dir = test_data_dir();
+        let workspace = data_dir.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("README.md"), "# Local workspace\n只读文本").unwrap();
+        let supervisor = RuntimeSupervisor::start_dev(&data_dir).unwrap();
+        let client = supervisor.client();
+        let selected = client
+            .request(
+                "workspace.open",
+                json!({ "path": workspace }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(selected.success);
+        let public = selected.result.unwrap();
+        assert_eq!(public["workspace"]["name"], "project");
+        assert!(public["workspace"].get("root").is_none());
+        let id = public["workspace"]["id"].as_str().unwrap();
+        let listing = client
+            .request(
+                "workspace.list",
+                json!({ "workspaceId": id }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(listing.success);
+        assert_eq!(listing.result.unwrap()["items"][0]["name"], "README.md");
+        let read = client
+            .request(
+                "workspace.read",
+                json!({ "workspaceId": id, "path": "README.md" }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(read.success);
+        assert_eq!(read.result.unwrap()["text"], "# Local workspace\n只读文本");
+        let denied = client
+            .request(
+                "workspace.read",
+                json!({ "workspaceId": id, "path": "../README.md" }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(!denied.success);
+        assert_eq!(denied.error.unwrap().code, "WORKSPACE_PATH_DENIED");
+        let closed = client
+            .request(
+                "workspace.close",
+                json!({ "workspaceId": id }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(closed.success);
+        let stale = client
+            .request(
+                "workspace.read",
+                json!({ "workspaceId": id, "path": "README.md" }),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(!stale.success);
+        assert_eq!(stale.error.unwrap().code, "WORKSPACE_CHANGED");
+        supervisor.shutdown().await.unwrap();
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
     // 2. 请求超时后，不应该遗留 Pending Request
     #[tokio::test]
     async fn should_cleanup_pending_on_timeout() {

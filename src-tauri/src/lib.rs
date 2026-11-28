@@ -8,6 +8,7 @@ use std::{
 
 use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
 pub mod supervisor;
@@ -25,6 +26,14 @@ struct RuntimeState {
     client: RuntimeClient,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     closing: AtomicBool,
+    workspace_picker: AtomicBool,
+}
+
+struct PickerGuard<'a>(&'a AtomicBool);
+impl Drop for PickerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 // ==========================================
@@ -70,6 +79,72 @@ async fn runtime_ping(state: State<'_, RuntimeState>, message: String) -> Result
 #[tauri::command]
 async fn runtime_info(state: State<'_, RuntimeState>) -> Result<Value, String> {
     call_runtime(state.client.clone(), "runtime.info", json!({})).await
+}
+
+/// Only a native user selection may grant a new absolute workspace path.
+#[tauri::command]
+async fn workspace_choose(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    state
+        .workspace_picker
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "WORKSPACE_PICKER_BUSY: A folder picker is already open.")?;
+    let _guard = PickerGuard(&state.workspace_picker);
+    let (sender, receiver) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("选择工作目录")
+        .pick_folder(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(path) = receiver
+        .await
+        .map_err(|_| "WORKSPACE_PICKER_FAILED: Folder selection failed.")?
+    else {
+        return Ok(json!({ "cancelled": true }));
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "WORKSPACE_PICKER_FAILED: A local folder is required.")?;
+    let path = path
+        .to_str()
+        .ok_or("WORKSPACE_PICKER_FAILED: Folder name cannot be represented as UTF-8.")?;
+    call_runtime(
+        state.client.clone(),
+        "workspace.open",
+        json!({ "path": path }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn workspace_state(state: State<'_, RuntimeState>) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "workspace.state", json!({})).await
+}
+
+#[tauri::command]
+async fn workspace_list(state: State<'_, RuntimeState>, input: Value) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "workspace.list", input).await
+}
+
+#[tauri::command]
+async fn workspace_read(state: State<'_, RuntimeState>, input: Value) -> Result<Value, String> {
+    call_runtime(state.client.clone(), "workspace.read", input).await
+}
+
+#[tauri::command]
+async fn workspace_close(
+    state: State<'_, RuntimeState>,
+    workspace_id: String,
+) -> Result<Value, String> {
+    call_runtime(
+        state.client.clone(),
+        "workspace.close",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await
 }
 
 // ==========================================
@@ -362,6 +437,7 @@ async fn conversation_chat_abort(
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 获取 Tauri 应用数据目录
             let app_data_dir = app
@@ -427,6 +503,7 @@ pub fn run() {
                 client,
                 shutdown: Mutex::new(Some(shutdown_tx)),
                 closing: AtomicBool::new(false),
+                workspace_picker: AtomicBool::new(false),
             });
 
             Ok(())
@@ -434,6 +511,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             runtime_ping,
             runtime_info,
+            workspace_choose,
+            workspace_state,
+            workspace_list,
+            workspace_read,
+            workspace_close,
             conversation_create,
             conversation_list,
             conversation_rename,
