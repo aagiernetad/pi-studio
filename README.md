@@ -24,7 +24,8 @@ pnpm tauri dev
 - 点击输入区模型胶囊搜索模型、切换服务商，并按模型原生支持调整推理强度。长代码可手动折叠，复制始终保留完整代码。
 - 服务商返回的思考内容可折叠查看，生成状态区分思考与回复；遮蔽内容不展示，普通模型不显示空面板。
 - 已完成回复下方显示原生请求耗时和服务商报告的输出 token；缺失的统计项不显示。
-- 勾选“沙箱计算”，助手可在 QuickJS / WASM 中运行 JavaScript，查看折叠代码和计算结果；每次执行限时 3 秒、内存 32 MiB，每次发送最多三轮模型请求。脚本无法访问本机文件、终端、网络或服务商凭据，普通聊天默认关闭此工具。
+- 勾选“沙箱计算”，助手可运行 Python 或 JavaScript，查看折叠代码和计算结果；计算与数据分析优先使用 Python。每次执行限时 3 秒，Python WASM 内存 256 MiB、JavaScript 内存 32 MiB，每次发送最多三轮模型请求。脚本无法访问本机文件、终端、网络或服务商凭据，普通聊天默认关闭此工具。
+- Python 使用随依赖提供的 CPython 3.11.3 / WASI，支持 math、statistics、csv、json 等标准库；每次执行独立，使用 print 返回结果。不需要系统 Python 或 Docker；当前不包含 NumPy / pandas，也不开放安装包和文件写入。
 - “工作区”通过系统对话框选择目录，支持目录浏览、筛选和只读文件预览。当前限 UTF-8 文本 / 代码、单文件 64 KiB、每目录最多 200 项；预览内容不会自动发送给模型，重启需重新选择目录。
 - “大纲”搜索当前已加载问题，沿分页加载更早问题；Alt + ↑ / ↓ 可跳转问题，输入时不接管快捷键。
 - 草稿只在本次打开期间保留。生成中退出后，未完成请求可能在重启恢复并再次调用模型；需要结束时先停止生成。
@@ -44,4 +45,4 @@ pnpm run ui:test
 
 React → Tauri Rust commands/events → JSONL IPC V1 → Node Runtime → Pi Durable / SQLite。Node 是 Durable Storage 的唯一所有者，Pi Durable 负责执行、调度、Checkpoint 与恢复。服务商和 Harness 共享一套 Models。
 
-当前支持文本聊天与隔离 JavaScript 计算，尚不向 Agent 开放文件或终端工具，也未实现 Router / Worker 自主工作流。计算沙箱不等于本机 Shell 的操作系统隔离，未来文件写入和命令执行仍需独立授权与隔离。架构边界见 [ADR-0001](docs/architecture/0001-runtime-boundaries.md)，逐步实现与验证记录见 docs/development。
+当前支持文本聊天与隔离 Python / JavaScript 计算，尚不向 Agent 开放文件或终端工具，也未实现 Router / Worker 自主工作流。计算沙箱不等于本机 Shell 的操作系统隔离，未来文件写入和命令执行仍需独立授权与隔离。架构边界见 [ADR-0001](docs/architecture/0001-runtime-boundaries.md)，逐步实现与验证记录见 docs/development。

@@ -467,6 +467,7 @@ test("沙箱开关按会话恢复，未知提交重试保留原权限，代码�
     window.fixture.entries[1] = [
       { id: 2, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [
         { type: 'toolCall', name: 'codemode', arguments: { code: 'text("<img src=x onerror=alert(1)>"); return 6 * 7;' } },
+        { type: 'toolCall', name: 'python', arguments: { code: 'print(6 * 7) # <script>不可执行</script>' } },
       ], stopReason: 'toolUse' }] },
       { id: 3, kind: 'pi.tool-result', data: { diagnostics: [] }, model: [{ role: 'toolResult', toolName: 'codemode', content: [{ type: 'text', text: '<img src=x>\n42' }], isError: false }] },
     ];
@@ -474,10 +475,14 @@ test("沙箱开关按会话恢复，未知提交重试保留原权限，代码�
   });
   await page.getByRole('button', { name: '刷新历史', exact: true }).click();
   await chat.getByText('正在计算...', { exact: true }).waitFor();
-  const calculation = page.locator('.transcript-list details').filter({ hasText: '沙箱计算' });
+  const calculation = page.locator('.transcript-list details.chat-notes').filter({ hasText: 'JavaScript' });
   assert.equal(await calculation.getAttribute('open'), null);
   await calculation.locator('summary').click();
   assert.match(await calculation.locator('pre').innerText(), /return 6 \* 7/);
+  const python = page.locator('.transcript-list details.chat-notes').filter({ hasText: 'Python' });
+  await python.locator('summary').click();
+  assert.match(await python.locator('pre').innerText(), /print\(6 \* 7\)/);
+  assert.equal(await python.locator('script').count(), 0);
   const result = page.locator('article').filter({ hasText: '计算结果' });
   assert.match(await result.locator('pre.transcript-content').innerText(), /42/);
   assert.equal(await page.locator('.transcript-list img').count(), 0);

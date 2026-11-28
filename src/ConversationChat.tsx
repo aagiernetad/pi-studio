@@ -252,7 +252,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           thinkingLevels={thinkingLevels} thinkingLevel={thinkingLevel} onThinking={level => setThinkingChoice({ providerId, modelId, level })}
           disabled={disabled} loading={modelsLoading} supported={supported}
           onProvider={setProviderId} onModel={setModelId} onRefresh={() => setRevision(value => value + 1)} />
-        <label className="appearance-checkbox" title="仅运行隔离 JavaScript，无法访问本机文件、终端或网络。每次发送最多调用模型三轮。">
+        <label className="appearance-checkbox" title="运行隔离 Python / JavaScript，无法访问本机文件、终端或网络。每次发送最多调用模型三轮。">
           <input type="checkbox" checked={sandbox} disabled={disabled} onChange={event => setSandbox(event.target.checked)} />沙箱计算
         </label>
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
@@ -277,7 +277,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
       </div>}
       {status?.contextReset && <p className="provider-notice" role="status">已开始新上下文。此前消息仍可在历史中查看。</p>}
       {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}{status?.thinkingLevel && status.thinkingLevel !== "off" ? `及推理强度“${thinkingLabels[status.thinkingLevel]}”` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
-      <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用。开启沙箱计算后，助手可运行隔离 JavaScript；每次执行限时 3 秒、内存 32 MiB，每次发送最多调用模型三轮。沙箱无法访问本机文件、终端或网络。</p>
+      <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用。开启沙箱计算后，助手可运行 Python 或 JavaScript；每次执行限时 3 秒，Python 内存 256 MiB、JavaScript 内存 32 MiB，每次发送最多调用模型三轮。Python 支持标准库，每次执行状态独立；沙箱无法访问本机文件、终端或网络。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>
 </div></details>
       {status?.running && <div className="chat-live">

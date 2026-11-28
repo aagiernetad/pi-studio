@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -25,6 +27,7 @@ async function fixture(context: TestContext) {
   let thinking: string | null = null;
   let script: string | null = null;
   let repeatScript = false;
+  let scriptTool: "codemode" | "python" = "codemode";
   let finishThinking = () => {};
   const calls: Record<string, unknown>[] = [];
   const server = createServer(async (request, response) => {
@@ -38,11 +41,11 @@ async function fixture(context: TestContext) {
       return;
     }
     response.writeHead(200, { "content-type": "text/event-stream" });
-    if (script !== null && (JSON.stringify(body.tools) ?? "").includes('"codemode"')) {
+    if (script !== null && (JSON.stringify(body.tools) ?? "").includes('"' + scriptTool + '"')) {
       const code = script;
       if (!repeatScript) script = null;
       response.write(`data: ${JSON.stringify({ id: "chat-local", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [
-        { index: 0, id: "sandbox-call-" + calls.length, type: "function", function: { name: "codemode", arguments: JSON.stringify({ code }) } },
+        { index: 0, id: "sandbox-call-" + calls.length, type: "function", function: { name: scriptTool, arguments: JSON.stringify({ code }) } },
       ] }, finish_reason: "tool_calls" }] })}\n\n`);
       response.end("data: [DONE]\n\n");
       return;
@@ -97,13 +100,13 @@ async function fixture(context: TestContext) {
     return submission.wait(BACKGROUND_CONTEXT);
   }
   return {
-    get host() { return host; }, credentials, conversation, config, calls, request, settled,
+    get host() { return host; }, directory, credentials, conversation, config, calls, request, settled,
     setMode(next: typeof mode) { mode = next; },
     enableUsage() { reportUsage = true; },
     disableUsage() { reportUsage = false; },
     enableThinking(text: string) { thinking = text; },
     finishThinking() { finishThinking(); },
-    setScript(code: string, repeat = false) { script = code; repeatScript = repeat; },
+    setScript(code: string, repeat = false, tool: "codemode" | "python" = "codemode") { script = code; repeatScript = repeat; scriptTool = tool; },
     input(content = "你好") { return { conversationId: conversation.id, requestId: randomUUID(), providerId: config.id, modelId: config.modelId, content }; },
     async reopen() { await host.close(); host = await DurableHost.open(directory, credentials); },
   };
@@ -201,6 +204,98 @@ test("sandbox clamps model-requested deadlines and output, contains memory exhau
   const limited = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
   assert.ok(limited.success && limited.result.failureReason === "turn_limit");
   assert.equal(f.calls.length - before, 3, "Durable bounds repeated tool rounds without a second scheduler");
+});
+
+test("Python sandbox runs standard-library calculations without host files, environment, network or processes", { timeout: 30_000 }, async context => {
+  const f = await fixture(context);
+  const hostFile = join(f.directory, "host-only.txt");
+  await writeFile(hostFile, "synthetic-host-only");
+  const previous = process.env.PI_STUDIO_PYTHON_SENTINEL;
+  process.env.PI_STUDIO_PYTHON_SENTINEL = "synthetic-private-environment";
+  context.after(() => { if (previous === undefined) delete process.env.PI_STUDIO_PYTHON_SENTINEL; else process.env.PI_STUDIO_PYTHON_SENTINEL = previous; });
+  const input = { ...f.input("用 Python 计算"), sandbox: true };
+  f.setScript(`import json, math, statistics, csv, io, os, sys
+private_value = 7
+def denied(code):
+    try:
+        exec(code)
+        return False
+    except Exception:
+        return True
+print(json.dumps({
+    "answer": math.factorial(5), "mean": statistics.mean([2, 4, 6]),
+    "csv": list(csv.reader(io.StringIO("a,b\\n1,2")))[1],
+    "environment": os.getenv("PI_STUDIO_PYTHON_SENTINEL"),
+    "read_denied": denied("open(" + repr(${JSON.stringify(hostFile)}) + ").read()"),
+    "write_denied": denied("open('scratch.txt', 'w').write('blocked')"),
+    "network_denied": denied("import socket; socket.socket()"),
+    "process_denied": denied("import subprocess; subprocess.run([sys.executable, '-c', 'pass'])"),
+    "bridge_denied": denied("import js"), "unicode": "你好，Python"
+}, ensure_ascii=False))`, false, "python");
+  const submitted = await f.request("conversation.chat.submit", input);
+  assert.ok(submitted.success);
+  assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+  const messages = f.calls[1]?.messages as { role: string; content: string }[];
+  const output = messages.find(message => message.role === "tool")?.content ?? "";
+  assert.match(output, /"answer": 120/);
+  assert.match(output, /"mean": 4/);
+  assert.match(output, /"csv": \["1", "2"\]/);
+  assert.match(output, /"environment": null/);
+  for (const name of ["read", "write", "network", "process", "bridge"]) assert.match(output, new RegExp('"' + name + '_denied": true'));
+  assert.match(output, /你好，Python/);
+  assert.equal(JSON.stringify(f.calls).includes("synthetic-private-environment"), false);
+  assert.equal(JSON.stringify(f.calls).includes("synthetic-host-only"), false);
+  assert.equal(f.calls.length, 2);
+  await f.reopen();
+  const duplicate = await f.request("conversation.chat.submit", input);
+  assert.ok(duplicate.success && duplicate.result.submissionId === submitted.result.submissionId);
+  assert.equal(f.calls.length, 2);
+  const history = await f.request("conversation.entries", { conversationId: f.conversation.id, limit: 20 });
+  assert.ok(history.success);
+  assert.match(JSON.stringify(history.result), /pi.tool-result/);
+  assert.match(JSON.stringify(history.result), /你好，Python/);
+  f.setScript('print("private_value" in globals())', false, "python");
+  const fresh = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+  assert.ok(fresh.success);
+  assert.equal((await f.settled(fresh.result.submissionId)).status, "done");
+  const latest = f.calls.at(-1)?.messages as { role: string; content: string }[];
+  assert.match([...latest].reverse().find(message => message.role === "tool")?.content ?? "", /False/);
+});
+
+test("Python sandbox bounds memory, output and execution time, supports cancellation and recovers", { timeout: 30_000 }, async context => {
+  const f = await fixture(context);
+  async function run(code: string) {
+    f.setScript(code, false, "python");
+    const submitted = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+    assert.ok(submitted.success);
+    assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+    const messages = f.calls.at(-1)?.messages as { role: string; content: string }[];
+    return [...messages].reverse().find(message => message.role === "tool")?.content ?? "";
+  }
+  assert.match(await run("data = bytearray(512 * 1024 * 1024)"), /MemoryError/);
+  const output = await run('print("x" * 100000)');
+  assert.match(output, /output limit/i);
+  assert.ok(Buffer.byteLength(output) <= 16 * 1024);
+  assert.match(await run("while True: pass"), /timed out/i);
+  f.setScript("while True: pass", false, "python");
+  const running = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+  assert.ok(running.success);
+  const deadline = Date.now() + 5000;
+  while (true) {
+    const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+    assert.ok(status.success);
+    if (status.result.phase === "computing") break;
+    assert.ok(Date.now() < deadline);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok((await f.request("conversation.chat.abort", { conversationId: f.conversation.id })).success);
+  assert.equal((await f.settled(running.result.submissionId)).status, "unanswered");
+  assert.match(await run("print(6 * 7)"), /42/);
+  const isolated = spawn(process.execPath, ["--max-old-space-size=128", "--wasm-max-mem-pages=4096",
+    fileURLToPath(new URL("./python-runner.mjs", import.meta.url))], { env: {}, windowsHide: true });
+  context.after(() => { if (isolated.exitCode === null) isolated.kill(); });
+  isolated.stdin.end("while True: pass");
+  assert.equal((await once(isolated, "close"))[0], 124, "the child deadline survives without the Runtime watchdog");
 });
 
 test("native chat submits idempotently, carries context and restores transcript and model after reopen", { timeout: 20_000 }, async (context) => {

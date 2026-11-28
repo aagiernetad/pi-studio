@@ -69,14 +69,15 @@ function modelThinking(value: unknown): string {
   return thinking.join("\n");
 }
 
-function sandboxScripts(value: unknown): string[] {
+function sandboxScripts(value: unknown): { code: string; language: string }[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap(message => message?.role === "assistant" && Array.isArray(message.content)
     ? message.content.flatMap((part: unknown) => {
       if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall" ||
-        !("name" in part) || part.name !== "codemode" || !("arguments" in part)) return [];
+        !("name" in part) || (part.name !== "codemode" && part.name !== "python") || !("arguments" in part)) return [];
       const args = part.arguments;
-      return args && typeof args === "object" && "code" in args && typeof args.code === "string" ? [args.code] : [];
+      return args && typeof args === "object" && "code" in args && typeof args.code === "string"
+        ? [{ code: args.code, language: part.name === "python" ? "Python" : "JavaScript" }] : [];
     }) : []);
 }
 
@@ -324,8 +325,8 @@ export default function ConversationTranscript({
               </div>
 
               {entry.kind === "pi.assistant" && <ThinkingBlock text={modelThinking(entry.model)} />}
-              {sandboxScripts(entry.model).map((code, index) => <details className="chat-notes" key={index}>
-                <summary>沙箱计算</summary><pre className="transcript-content">{code}</pre>
+              {sandboxScripts(entry.model).map((script, index) => <details className="chat-notes" key={index}>
+                <summary>{script.language}</summary><pre className="transcript-content">{script.code}</pre>
               </details>)}
               {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
                 <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
