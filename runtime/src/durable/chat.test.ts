@@ -23,6 +23,8 @@ async function fixture(context: TestContext) {
   let mode: "success" | "error" | "slow" = "success";
   let reportUsage = false;
   let thinking: string | null = null;
+  let script: string | null = null;
+  let repeatScript = false;
   let finishThinking = () => {};
   const calls: Record<string, unknown>[] = [];
   const server = createServer(async (request, response) => {
@@ -36,6 +38,15 @@ async function fixture(context: TestContext) {
       return;
     }
     response.writeHead(200, { "content-type": "text/event-stream" });
+    if (script !== null && (JSON.stringify(body.tools) ?? "").includes('"codemode"')) {
+      const code = script;
+      if (!repeatScript) script = null;
+      response.write(`data: ${JSON.stringify({ id: "chat-local", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [
+        { index: 0, id: "sandbox-call-" + calls.length, type: "function", function: { name: "codemode", arguments: JSON.stringify({ code }) } },
+      ] }, finish_reason: "tool_calls" }] })}\n\n`);
+      response.end("data: [DONE]\n\n");
+      return;
+    }
     const write = (content: string, reason: string | null) => response.write(`data: ${JSON.stringify({ id: "chat-local", object: "chat.completion.chunk", created: 1, model: "chat-model", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: reason }] })}\n\n`);
     if (thinking !== null) {
       response.write(`data: ${JSON.stringify({ id: "chat-local", choices: [{ index: 0, delta: { role: "assistant", reasoning_content: thinking }, finish_reason: null }] })}\n\n`);
@@ -92,10 +103,105 @@ async function fixture(context: TestContext) {
     disableUsage() { reportUsage = false; },
     enableThinking(text: string) { thinking = text; },
     finishThinking() { finishThinking(); },
+    setScript(code: string, repeat = false) { script = code; repeatScript = repeat; },
     input(content = "你好") { return { conversationId: conversation.id, requestId: randomUUID(), providerId: config.id, modelId: config.modelId, content }; },
     async reopen() { await host.close(); host = await DurableHost.open(directory, credentials); },
   };
 }
+
+test("opt-in native sandbox isolates host capabilities, VM globals and conversation stores, and persists tool results", { timeout: 30_000 }, async context => {
+  const f = await fixture(context);
+  const input = { ...f.input("计算并检查隔离"), sandbox: true };
+  f.setScript(`store("private", "conversation-one"); globalThis.privateValue = 7;
+    let imported = false;
+    try { await import("node:fs"); imported = true; } catch {}
+    return { answer: 6 * 7, process: typeof process, require: typeof require, fetch: typeof fetch,
+      wasm: typeof WebAssembly, tools: ALL_TOOLS.length, models: typeof models, imported,
+      constructorEscape: ({}).constructor.constructor("return typeof process")() };`);
+  const submitted = await f.request("conversation.chat.submit", input);
+  assert.ok(submitted.success);
+  assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+  const toolResult = JSON.stringify(f.calls[1]?.messages);
+  assert.match(toolResult, /answer.*42/);
+  for (const name of ["process", "require", "fetch", "wasm", "models"]) assert.match(toolResult, new RegExp(name + '.*undefined'));
+  assert.match(toolResult, /tools.*0/);
+  assert.match(toolResult, /imported.*false/);
+  assert.match(toolResult, /constructorEscape.*undefined/);
+  assert.equal(f.calls.length, 2, "Durable runs the tool and asks the model for the final answer");
+  assert.equal(JSON.stringify(f.calls[0]?.tools).includes('"codemode"'), true);
+  assert.equal(JSON.stringify(f.calls[0]).includes("synthetic-chat-secret"), false);
+  const conflict = await f.request("conversation.chat.submit", { ...input, sandbox: false });
+  assert.ok(!conflict.success && conflict.error.code === "REQUEST_ID_CONFLICT");
+  await f.reopen();
+  const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(status.success && status.result.sandbox === true);
+  const duplicate = await f.request("conversation.chat.submit", input);
+  assert.ok(duplicate.success && duplicate.result.submissionId === submitted.result.submissionId);
+  assert.equal(f.calls.length, 2);
+  const history = await f.request("conversation.entries", { conversationId: f.conversation.id, limit: 20 });
+  assert.ok(history.success);
+  assert.match(JSON.stringify(history.result), /pi.tool-result/);
+  assert.match(JSON.stringify(history.result), /answer.*42/);
+
+  const other = await createUserConversation(f.host.harness, randomUUID(), "隔离会话");
+  f.setScript('return { stored: load("private") ?? null, global: typeof privateValue };');
+  const separate = await f.request("conversation.chat.submit", { ...f.input(), conversationId: other.id, sandbox: true });
+  assert.ok(separate.success);
+  assert.equal((await f.settled(separate.result.submissionId)).status, "done");
+  assert.match(JSON.stringify(f.calls.at(-1)?.messages), /stored.*null.*global.*undefined/);
+  f.setScript('return { stored: load("private"), global: typeof privateValue };');
+  const again = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+  assert.ok(again.success);
+  assert.equal((await f.settled(again.result.submissionId)).status, "done");
+  assert.match(JSON.stringify(f.calls.at(-1)?.messages), /stored.*conversation-one.*global.*undefined/);
+  const plain = await f.request("conversation.chat.submit", f.input("普通聊天"));
+  assert.ok(plain.success);
+  assert.equal((await f.settled(plain.result.submissionId)).status, "done");
+  assert.deepEqual(f.calls.at(-1)?.tools ?? [], [], "turning off the sandbox removes all model tools");
+});
+
+test("sandbox clamps model-requested deadlines and output, contains memory exhaustion, and remains usable", { timeout: 30_000 }, async context => {
+  const f = await fixture(context);
+  async function run(code: string) {
+    f.setScript(code);
+    const submitted = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+    assert.ok(submitted.success);
+    assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+    const messages = f.calls.at(-1)?.messages as { role: string; content: string }[];
+    const result = [...messages].reverse().find(message => message.role === "tool");
+    assert.ok(result);
+    return result.content;
+  }
+  const started = Date.now();
+  assert.match(await run('// @options: {"timeout_ms": 600000}\nwhile (true) {}'), /timed out|timeout/i);
+  assert.ok(Date.now() - started < 15_000, "model options cannot remove the host deadline");
+  assert.match(await run('const values = []; while (true) values.push("x".repeat(1024 * 1024));'), /memory/i);
+  const output = await run('// @options: {"max_output_tokens": 100000}\ntext("x".repeat(100000));');
+  assert.ok(Buffer.byteLength(output) <= 16 * 1024);
+  f.setScript("while (true) {}");
+  const running = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+  assert.ok(running.success);
+  const deadline = Date.now() + 5000;
+  while (true) {
+    const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+    assert.ok(status.success);
+    if (status.result.phase === "computing") break;
+    assert.ok(Date.now() < deadline, "sandbox enters the native tool task");
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const stopped = await f.request("conversation.chat.abort", { conversationId: f.conversation.id });
+  assert.ok(stopped.success);
+  assert.equal((await f.settled(running.result.submissionId)).status, "unanswered");
+  assert.match(await run("return 21 * 2;"), /42/);
+  const before = f.calls.length;
+  f.setScript("return 1;", true);
+  const looping = await f.request("conversation.chat.submit", { ...f.input(), sandbox: true });
+  assert.ok(looping.success);
+  assert.equal((await f.settled(looping.result.submissionId)).status, "unanswered");
+  const limited = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(limited.success && limited.result.failureReason === "turn_limit");
+  assert.equal(f.calls.length - before, 3, "Durable bounds repeated tool rounds without a second scheduler");
+});
 
 test("native chat submits idempotently, carries context and restores transcript and model after reopen", { timeout: 20_000 }, async (context) => {
   const f = await fixture(context);

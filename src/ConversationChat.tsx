@@ -14,11 +14,12 @@ type Status = {
   canResume: boolean;
   contextReset: boolean;
   thinkingLevel?: ThinkingLevel;
-  phase?: "waiting" | "thinking" | "responding" | null;
+  sandbox?: boolean;
+  phase?: "waiting" | "thinking" | "responding" | "computing" | null;
   partialThinking?: string;
   thinkingTruncated?: boolean;
 };
-type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string; thinkingLevel?: ThinkingLevel };
+type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string; thinkingLevel?: ThinkingLevel; sandbox?: boolean };
 export type ConversationDraft = { content: string; input: Input | null };
 export type DraftUpdate =
   | { type: "edit"; content: string }
@@ -51,6 +52,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   const [models, setModels] = useState<Model[]>([]);
   const [modelId, setModelId] = useState("");
   const [thinkingChoice, setThinkingChoice] = useState<{ providerId: string; modelId: string; level: ThinkingLevel } | null>(null);
+  const [sandbox, setSandbox] = useState(draft?.input?.sandbox ?? false);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState("");
@@ -123,6 +125,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         if (first) {
           savedModel.current = next.model;
           if (next.model) setThinkingChoice({ ...next.model, level: next.thinkingLevel ?? "off" });
+          if (!pending.current) setSandbox(next.sandbox ?? false);
           if (next.model && availableProviders.current.some((item) => item.id === next.model?.providerId)) { setProviderId(next.model.providerId); setModelId(next.model.modelId); }
           first = false;
         }
@@ -141,7 +144,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
   async function send() {
     if (working.current || !status || status.running || modelsLoading || confirmReset || hasPendingReset) return;
     if (!pending.current) pending.current = { conversationId, requestId: crypto.randomUUID(), providerId, modelId, content: content.trim(),
-      ...(thinkingLevel !== "off" ? { thinkingLevel } : {}) };
+      ...(thinkingLevel !== "off" ? { thinkingLevel } : {}), ...(sandbox ? { sandbox: true } : {}) };
     const input = pending.current;
     if (!input.content) return;
     onDraftUpdate({ type: "pending", content, input });
@@ -249,6 +252,9 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
           thinkingLevels={thinkingLevels} thinkingLevel={thinkingLevel} onThinking={level => setThinkingChoice({ providerId, modelId, level })}
           disabled={disabled} loading={modelsLoading} supported={supported}
           onProvider={setProviderId} onModel={setModelId} onRefresh={() => setRevision(value => value + 1)} />
+        <label className="appearance-checkbox" title="仅运行隔离 JavaScript，无法访问本机文件、终端或网络。每次发送最多调用模型三轮。">
+          <input type="checkbox" checked={sandbox} disabled={disabled} onChange={event => setSandbox(event.target.checked)} />沙箱计算
+        </label>
         <button type="button" className="primary" disabled={!status || status.running || action !== null || hasPendingResume || confirmReset || hasPendingReset || modelsLoading || !content.trim() || (!hasPending && (!selected || !supported(selected.api)))} onClick={() => void send()}>
           {action === "send" ? "提交中..." : hasPending ? "重试同一请求" : "发送消息"}<StudioIcon name="send" />
         </button>
@@ -271,15 +277,15 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
       </div>}
       {status?.contextReset && <p className="provider-notice" role="status">已开始新上下文。此前消息仍可在历史中查看。</p>}
       {(status?.canResume || hasPendingResume) && <p className="muted">继续使用上次发送时的模型{status?.model ? `（${status.model.providerId} / ${status.model.modelId}）` : ""}{status?.thinkingLevel && status.thinkingLevel !== "off" ? `及推理强度“${thinkingLabels[status.thinkingLevel]}”` : ""}，不新增用户消息；会再次调用模型，可能产生费用。</p>}
-      <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
+      <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用。开启沙箱计算后，助手可运行隔离 JavaScript；每次执行限时 3 秒、内存 32 MiB，每次发送最多调用模型三轮。沙箱无法访问本机文件、终端或网络。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>
 </div></details>
       {status?.running && <div className="chat-live">
-        <p role="status">{status.phase === "thinking" ? "正在思考..." : status.phase === "responding" ? "正在回复..." : "正在生成回复..."}</p>
+        <p role="status">{status.phase === "computing" ? "正在计算..." : status.phase === "thinking" ? "正在思考..." : status.phase === "responding" ? "正在回复..." : "正在生成回复..."}</p>
         <ThinkingBlock text={status.partialThinking ?? ""} truncated={status.thinkingTruncated} />
         {status.partialText && <pre className="transcript-content">{status.partialText}</pre>}
       </div>}
-      {!status?.running && status?.failureReason && <p role="status" className="muted">{status.failureReason === "aborted" ? "生成已停止，已产生的历史会保留。" : "本轮未完成回复，请检查模型、凭据或网络后再发送。"}</p>}
+      {!status?.running && status?.failureReason && <p role="status" className="muted">{status.failureReason === "aborted" ? "生成已停止，已产生的历史会保留。" : status.failureReason === "turn_limit" ? "已达到本轮计算上限，可发送新消息继续。" : "本轮未完成回复，请检查模型、凭据或网络后再发送。"}</p>}
       {(error || catalogError || modelError || statusError) && <div role="alert" className="error">{error || catalogError || modelError || statusError}</div>}
     </div>
   );

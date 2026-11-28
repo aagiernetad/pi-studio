@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { configuredProvider, listProviderConfigs } from "./provider-config.js";
 import { installChatPolicy } from "./chat-policy.js";
+import { createSandbox } from "./sandbox.js";
 
 /**
  * Pi Durable 应用级宿主。
@@ -26,6 +27,7 @@ export class DurableHost {
   private constructor(
     readonly harness: Harness,
     readonly models: ReturnType<typeof builtinModels>,
+    readonly sandbox: ReturnType<typeof createSandbox>,
   ) {}
 
   static async open(dataDir: string, credentials?: CredentialStore): Promise<DurableHost> {
@@ -48,13 +50,17 @@ export class DurableHost {
     // Provider 管理和 Harness 共享同一个实例。
     const models = builtinModels({ credentials });
     installChatPolicy(models);
+    const sandbox = createSandbox();
+    const registry = createRegistry();
+    registry.install(sandbox.extension);
 
     const harness = await Harness.open(
       storage,
       {
         models,
-        registry: createRegistry(),
+        registry,
         settings: {
+          extensions: [],
           retry: { enabled: false, maxRetries: 0 },
           stream: { timeoutMs: 60_000, maxRetries: 0, transport: "sse" },
           compaction: { enabled: false },
@@ -70,13 +76,14 @@ export class DurableHost {
       }
     } catch {
       await harness.close(BACKGROUND_CONTEXT);
+      await sandbox.close();
       throw new Error("Provider configuration could not be restored");
     }
 
     // 恢复持久化任务
     harness.resume();
 
-    return new DurableHost(harness, models);
+    return new DurableHost(harness, models, sandbox);
   }
 
   // 获取内部 Root Conversation
@@ -105,6 +112,7 @@ export class DurableHost {
   }
 
   async close(): Promise<void> {
-    await this.harness.close(BACKGROUND_CONTEXT);
+    try { await this.harness.close(BACKGROUND_CONTEXT); }
+    finally { await this.sandbox.close(); }
   }
 }

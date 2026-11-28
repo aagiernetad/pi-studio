@@ -141,6 +141,7 @@ async function fixture(run, withChat = false) {
             const current = chatStatus(input.conversationId);
             current.model = { providerId: input.providerId, modelId: input.modelId };
             current.thinkingLevel = input.thinkingLevel ?? "off";
+            current.sandbox = input.sandbox ?? false;
             if (state.nextContextUsage) { state.contextUsages ??= {}; state.contextUsages[input.conversationId] = { ...structuredClone(state.nextContextUsage), conversationId: input.conversationId, latestEntryId: id * 2 }; }
             current.running = !!state.slowChat;
             current.canResume = false;
@@ -442,6 +443,47 @@ test("聊天超时重试保留同一请求，历史直接显示消息正文", as
   assert.equal(args[0].requestId, args[1].requestId);
   assert.equal(await page.evaluate(() => Object.keys(window.fixture.submissions).length), 1);
   assert.equal(await chat.getByLabel('消息内容').inputValue(), '');
+}, true));
+
+test("沙箱开关按会话恢复，未知提交重试保留原权限，代码与结果按纯文本显示", async () => fixture(async page => {
+  const chat = page.locator('.chat-panel');
+  const checkbox = chat.getByRole('checkbox', { name: '沙箱计算', exact: true });
+  assert.equal(await checkbox.isChecked(), false);
+  await checkbox.check();
+  await page.evaluate(() => { window.fixture.failSubmitOnce = true; });
+  await chat.getByLabel('消息内容').fill('帮我计算');
+  await chat.getByRole('button', { name: '发送消息', exact: true }).click();
+  await chat.getByRole('button', { name: '重试同一请求', exact: true }).waitFor();
+  assert.equal(await checkbox.isDisabled(), true);
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  assert.equal(await checkbox.isChecked(), false);
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  assert.equal(await checkbox.isChecked(), true);
+  await chat.getByRole('button', { name: '重试同一请求', exact: true }).click();
+  const inputs = await page.evaluate(() => window.fixture.submitArgs);
+  assert.deepEqual(inputs[0], inputs[1]);
+  assert.equal(inputs[0].sandbox, true);
+  await page.evaluate(() => {
+    window.fixture.entries[1] = [
+      { id: 2, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content: [
+        { type: 'toolCall', name: 'codemode', arguments: { code: 'text("<img src=x onerror=alert(1)>"); return 6 * 7;' } },
+      ], stopReason: 'toolUse' }] },
+      { id: 3, kind: 'pi.tool-result', data: { diagnostics: [] }, model: [{ role: 'toolResult', toolName: 'codemode', content: [{ type: 'text', text: '<img src=x>\n42' }], isError: false }] },
+    ];
+    Object.assign(window.fixture.statuses[1], { running: true, phase: 'computing' });
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  await chat.getByText('正在计算...', { exact: true }).waitFor();
+  const calculation = page.locator('.transcript-list details').filter({ hasText: '沙箱计算' });
+  assert.equal(await calculation.getAttribute('open'), null);
+  await calculation.locator('summary').click();
+  assert.match(await calculation.locator('pre').innerText(), /return 6 \* 7/);
+  const result = page.locator('article').filter({ hasText: '计算结果' });
+  assert.match(await result.locator('pre.transcript-content').innerText(), /42/);
+  assert.equal(await page.locator('.transcript-list img').count(), 0);
+  assert.equal((await page.locator('.transcript-list').innerText()).includes('diagnostics'), false);
+  await page.evaluate(() => Object.assign(window.fixture.statuses[1], { running: false, failureReason: 'turn_limit' }));
+  await chat.getByText('已达到本轮计算上限，可发送新消息继续。', { exact: true }).waitFor();
 }, true));
 
 test("切换会话不终止原生成，迟到状态不覆盖当前会话，返回后可停止", async () => fixture(async (page) => {

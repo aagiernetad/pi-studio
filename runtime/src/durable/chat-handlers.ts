@@ -13,6 +13,7 @@ const SubmitParams = ConversationParams.extend({
   requestId: z.uuid(), providerId: z.string().trim().min(1).max(128),
   modelId: z.string().trim().min(1).max(256), content: z.string().trim().min(1).max(8000),
   thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("off"),
+  sandbox: z.boolean().default(false),
 });
 const ResumeParams = ConversationParams.extend({ requestId: z.uuid() });
 const ResetParams = ConversationParams.extend({ requestId: z.uuid() });
@@ -57,7 +58,8 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
       const metadata = entry?.data;
       if (prior.type !== "input" || !metadata || typeof metadata !== "object" || Array.isArray(metadata) ||
         metadata.providerId !== input.providerId || metadata.modelId !== input.modelId ||
-        (metadata.thinkingLevel ?? "off") !== input.thinkingLevel || entry?.model?.[0]?.role !== "user" || entry.model[0].content !== input.content) {
+        (metadata.thinkingLevel ?? "off") !== input.thinkingLevel || (metadata.sandbox ?? false) !== input.sandbox ||
+        entry?.model?.[0]?.role !== "user" || entry.model[0].content !== input.content) {
         throw new RuntimeApplicationError("REQUEST_ID_CONFLICT", "Request id was used for another input.");
       }
       return prior;
@@ -76,11 +78,12 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
         checkThinkingLevel();
         const id = await conversation.submit(tx, {
           type: "input", requestId: input.requestId, content: input.content, whenBusy: "reject",
-          entry: { kind: "studio.chat-input", data: { providerId: input.providerId, modelId: input.modelId, thinkingLevel: input.thinkingLevel } },
+          entry: { kind: "studio.chat-input", data: { providerId: input.providerId, modelId: input.modelId, thinkingLevel: input.thinkingLevel, sandbox: input.sandbox } },
         });
         await configure(tx, conversation.id, {
           model: { provider: input.providerId, modelId: input.modelId },
-          tools: [], extensions: [], modelTools: [], thinkingLevel: input.thinkingLevel, maxTurns: 1,
+          tools: input.sandbox ? host.sandbox.extension.tools : [], extensions: input.sandbox ? [host.sandbox.extension] : [],
+          modelTools: input.sandbox ? host.sandbox.extension.tools : [], thinkingLevel: input.thinkingLevel, maxTurns: input.sandbox ? 3 : 1,
         });
         return id;
       }, BACKGROUND_CONTEXT);
@@ -181,15 +184,17 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
       const live = await tx.doc(LiveDoc, conversation.id);
       const content = live.run ? live.generation?.message?.content ?? [] : [];
       const thinking = content.flatMap(item => item.type === "thinking" && !item.redacted ? [item.thinking] : []).join("\n");
-      let phase: "waiting" | "thinking" | "responding" | null = live.run ? "waiting" : null;
+      let phase: "waiting" | "thinking" | "responding" | "computing" | null = live.run ? "waiting" : null;
       for (const item of content) {
         if (item.type === "thinking" && (item.thinking || item.redacted)) phase = "thinking";
         if (item.type === "text" && item.text) phase = "responding";
       }
+      if (live.run && live.tools?.some(tool => tool.status !== "done")) phase = "computing";
       return {
         conversationId, running: Boolean(live.run), latestEntryId: latest ?? null,
         model: agent.model ? { providerId: agent.model.provider, modelId: agent.model.modelId } : null,
         thinkingLevel: agent.thinkingLevel ?? "off",
+        sandbox: Array.isArray(agent.extensions) && agent.extensions.includes("codemode"),
         failureReason: contextReset ? null : live.runFailure?.reason ?? null,
         canResume: !contextReset && !live.run && Boolean(live.runFailure && resumableReasons.has(live.runFailure.reason)),
         contextReset,
