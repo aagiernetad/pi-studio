@@ -336,6 +336,79 @@ test("切换会话不终止原生成，迟到状态不覆盖当前会话，返�
   assert.equal(await chat.getByLabel('消息内容').isEnabled(), true);
 }, true));
 
+test("原生思考流可折叠，轮询保留展开状态，停止后清除实时预览", async () => fixture(async page => {
+  const chat = page.locator('.chat-panel');
+  await chat.getByLabel('消息内容', { exact: true }).fill('保留当前草稿');
+  await page.evaluate(() => { Object.assign(window.fixture.statuses[1], {
+    running: true, phase: 'thinking', partialThinking: '<img src="https://invalid.example/probe">思考正文', partialText: '', thinkingTruncated: false,
+  }); });
+  await chat.getByRole('status').filter({ hasText: '正在思考...' }).waitFor();
+  const thinking = chat.locator('.message-thinking');
+  assert.equal(await thinking.getAttribute('open'), null);
+  await thinking.locator('summary').focus(); await page.keyboard.press('Enter');
+  await thinking.locator('pre').waitFor();
+  assert.equal(await thinking.locator('img').count(), 0);
+  assert.ok((await thinking.locator('pre').innerText()).includes('<img'));
+  await page.evaluate(() => Object.assign(window.fixture.statuses[1], {
+    phase: 'responding', partialThinking: '后续思考', thinkingTruncated: true, partialText: '真正回复正文',
+  }));
+  await chat.getByText('正在回复...', { exact: true }).waitFor();
+  assert.notEqual(await thinking.getAttribute('open'), null);
+  assert.equal(await thinking.locator('pre').innerText(), '后续思考');
+  await chat.getByText('真正回复正文', { exact: true }).waitFor();
+  await thinking.getByText('实时预览仅显示末尾部分，完成后可查看完整内容。', { exact: true }).waitFor();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  }
+  await chat.getByRole('button', { name: '停止生成', exact: true }).click();
+  await chat.getByText('生成已停止，已产生的历史会保留。', { exact: true }).waitFor();
+  assert.equal(await chat.locator('.chat-live').count(), 0);
+  assert.equal(await chat.getByLabel('消息内容', { exact: true }).inputValue(), '保留当前草稿');
+}, true));
+
+test("历史思考与正文分开展示，遮蔽内容、签名和失败文本不进入思考面板", async () => fixture(async page => {
+  await page.evaluate(() => {
+    const assistant = (id, content, stopReason = 'stop') => ({ id, kind: 'pi.assistant', data: null, model: [{ role: 'assistant', content, stopReason }] });
+    window.fixture.entries[1] = [
+      assistant(1, [{ type: 'thinking', thinking: '完整历史思考', thinkingSignature: 'opaque-history-signature' }, { type: 'text', text: '独立回复正文' }]),
+      assistant(2, [{ type: 'thinking', thinking: '遮蔽的思考', redacted: true, thinkingSignature: 'opaque-redacted-signature' }, { type: 'text', text: '正常正文' }]),
+      assistant(3, [{ type: 'thinking', thinking: '只有思考的回复' }]),
+      assistant(4, [{ type: 'thinking', thinking: '失败时的私密文本' }], 'error'),
+    ];
+  });
+  await page.getByRole('button', { name: '刷新历史', exact: true }).click();
+  const history = page.locator('.transcript-list');
+  await history.getByText('独立回复正文', { exact: true }).waitFor();
+  assert.equal(await history.locator('.message-thinking').count(), 2);
+  const mixed = history.locator('[data-entry-id="1"]');
+  assert.equal(await mixed.locator('.message-thinking').getAttribute('open'), null);
+  await mixed.locator('.message-thinking summary').click();
+  await mixed.getByText('完整历史思考', { exact: true }).waitFor();
+  assert.equal((await mixed.locator('.chat-message').innerText()).includes('完整历史思考'), false);
+  const only = history.locator('[data-entry-id="3"]');
+  assert.equal(await only.locator('.chat-message, .transcript-content').count(), 0);
+  const visible = await history.innerText();
+  for (const hidden of ['遮蔽的思考', 'opaque-history-signature', 'opaque-redacted-signature', '失败时的私密文本']) assert.equal(visible.includes(hidden), false);
+}, true));
+
+test("切换会话后迟到思考流不串入新会话，返回可读取原生实时状态", async () => fixture(async page => {
+  await page.evaluate(() => { Object.assign(window.fixture.statuses[1], { running: true, phase: 'thinking', partialThinking: '会话甲独有思考' }); });
+  await page.getByText('正在思考...', { exact: true }).waitFor();
+  await page.evaluate(() => { window.fixture.holdStatus = 1; });
+  await page.waitForFunction(() => typeof window.fixture.releaseStatus === 'function');
+  await page.getByRole('button', { name: /会话乙/ }).click();
+  await page.waitForFunction(() => !document.querySelector('textarea[aria-label="消息内容"]').disabled);
+  await page.evaluate(() => { window.fixture.holdStatus = null; window.fixture.releaseStatus(); });
+  assert.equal(await page.locator('.chat-live').count(), 0);
+  await page.getByRole('button', { name: /会话甲/ }).click();
+  await page.getByText('正在思考...', { exact: true }).waitFor();
+  await page.locator('.chat-live .message-thinking summary').click();
+  await page.locator('.chat-live').getByText('会话甲独有思考', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.fixture.calls.includes('conversation_chat_abort')), false);
+}, true));
+
 test("新消息刷新历史时，旧分页请求不能混入新首页", async () => fixture(async (page) => {
   await page.evaluate(() => { window.fixture.paginated = true; window.fixture.holdOlder = true; });
   await page.getByRole('button', { name: '刷新历史', exact: true }).click();

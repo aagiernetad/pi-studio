@@ -22,6 +22,8 @@ async function fixture(context: TestContext) {
   const credentials = new InMemoryCredentialStore();
   let mode: "success" | "error" | "slow" = "success";
   let reportUsage = false;
+  let thinking: string | null = null;
+  let finishThinking = () => {};
   const calls: Record<string, unknown>[] = [];
   const server = createServer(async (request, response) => {
     let raw = "";
@@ -35,6 +37,13 @@ async function fixture(context: TestContext) {
     }
     response.writeHead(200, { "content-type": "text/event-stream" });
     const write = (content: string, reason: string | null) => response.write(`data: ${JSON.stringify({ id: "chat-local", object: "chat.completion.chunk", created: 1, model: "chat-model", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: reason }] })}\n\n`);
+    if (thinking !== null) {
+      response.write(`data: ${JSON.stringify({ id: "chat-local", choices: [{ index: 0, delta: { role: "assistant", reasoning_content: thinking }, finish_reason: null }] })}\n\n`);
+      if (mode === "slow") {
+        finishThinking = () => { write("思考后的回复", "stop"); response.end("data: [DONE]\n\n"); };
+        return;
+      }
+    }
     write("本地回复", null);
     if (reportUsage) response.write(`data: ${JSON.stringify({ id: "chat-local", choices: [], usage: {
       prompt_tokens: 12, completion_tokens: 5, total_tokens: 17,
@@ -81,6 +90,8 @@ async function fixture(context: TestContext) {
     setMode(next: typeof mode) { mode = next; },
     enableUsage() { reportUsage = true; },
     disableUsage() { reportUsage = false; },
+    enableThinking(text: string) { thinking = text; },
+    finishThinking() { finishThinking(); },
     input(content = "你好") { return { conversationId: conversation.id, requestId: randomUUID(), providerId: config.id, modelId: config.modelId, content }; },
     async reopen() { await host.close(); host = await DurableHost.open(directory, credentials); },
   };
@@ -137,6 +148,74 @@ test("chat rejects busy conversation and native abort stops its generation", { t
   assert.ok(status.success);
   assert.equal(status.result.running, false);
   assert.equal(status.result.failureReason, "aborted");
+});
+
+test("native streamed thinking is bounded, excludes redacted payloads and survives completed history reopen", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  const thinking = "预览之前" + "思".repeat(12000) + "思考末尾";
+  f.enableThinking(thinking); f.setMode("slow");
+  const submitted = await f.request("conversation.chat.submit", f.input());
+  assert.ok(submitted.success);
+  const deadline = Date.now() + 5000;
+  while (true) {
+    const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+    assert.ok(status.success);
+    if (status.result.phase === "thinking") {
+      assert.equal(status.result.partialThinking, thinking.slice(-12000));
+      assert.equal(status.result.thinkingTruncated, true);
+      assert.equal(status.result.partialText, "");
+      break;
+    }
+    assert.ok(Date.now() < deadline, "native thinking reaches committed status");
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  await f.host.harness.commit(async tx => {
+    const live = await tx.doc(LiveDoc, f.conversation.id as ConversationId);
+    assert.ok(live.generation?.message);
+    live.generation.message.content.push({ type: "thinking", thinking: "redacted-private-payload", redacted: true, thinkingSignature: "opaque-signature" });
+  }, BACKGROUND_CONTEXT);
+  const filtered = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(filtered.success);
+  assert.equal(JSON.stringify(filtered).includes("redacted-private-payload"), false);
+  assert.equal(JSON.stringify(filtered).includes("opaque-signature"), false);
+  f.finishThinking();
+  assert.equal((await f.settled(submitted.result.submissionId)).status, "done");
+  await f.reopen();
+  const idle = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(idle.success);
+  assert.equal(idle.result.phase, null);
+  assert.equal(idle.result.partialThinking, "");
+  assert.equal(idle.result.thinkingTruncated, false);
+  const history = await f.request("conversation.entries", { conversationId: f.conversation.id });
+  assert.ok(history.success);
+  assert.ok(JSON.stringify(history.result).includes(thinking), "preview limits do not truncate Durable history");
+  assert.equal(f.calls.length, 1);
+});
+
+test("text-only streaming reports responding and abort clears the live projection", { timeout: 20_000 }, async (context) => {
+  const f = await fixture(context);
+  f.setMode("slow");
+  const submitted = await f.request("conversation.chat.submit", f.input());
+  assert.ok(submitted.success);
+  const deadline = Date.now() + 5000;
+  while (true) {
+    const status = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+    assert.ok(status.success);
+    if (status.result.phase === "responding") {
+      assert.equal(status.result.partialText, "本地回复");
+      assert.equal(status.result.partialThinking, "");
+      break;
+    }
+    assert.ok(Date.now() < deadline);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  await f.request("conversation.chat.abort", { conversationId: f.conversation.id });
+  await f.settled(submitted.result.submissionId);
+  const stopped = await f.request("conversation.chat.status", { conversationId: f.conversation.id });
+  assert.ok(stopped.success);
+  assert.equal(stopped.result.phase, null);
+  assert.equal(stopped.result.partialText, "");
+  assert.equal(stopped.result.partialThinking, "");
 });
 
 test("thinking levels reach the native request and survive resume, reopen and idempotent retry", { timeout: 20_000 }, async (context) => {

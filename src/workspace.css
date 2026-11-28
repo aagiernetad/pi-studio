@@ -435,3 +435,8 @@ pre,code,kbd { font-family:var(--mono-font); }
 [data-motion-paused="true"] .context-usage-dialog { animation-play-state:paused !important; }
 @media(max-width:900px) { .context-usage { margin-left:0; } }
 @media(forced-colors:active) { .context-vial { border-color:ButtonText; } .context-vial i { background:Highlight; } }
+.message-thinking { margin: 0.5rem 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.message-thinking summary { padding: 0.55rem 0.75rem; cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+.message-thinking summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.message-thinking pre { margin: 0; padding: 0.75rem; max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 0.88rem; line-height: 1.7; }
+.message-thinking > p { padding: 0 0.75rem 0.5rem; font-size: 0.8rem; }

@@ -179,6 +179,13 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
       const contextReset = Boolean(latest && (await tx.entry(latest))?.kind === ResetEntry.kind);
       const agent = await tx.doc(AgentDoc, conversation.id);
       const live = await tx.doc(LiveDoc, conversation.id);
+      const content = live.run ? live.generation?.message?.content ?? [] : [];
+      const thinking = content.flatMap(item => item.type === "thinking" && !item.redacted ? [item.thinking] : []).join("\n");
+      let phase: "waiting" | "thinking" | "responding" | null = live.run ? "waiting" : null;
+      for (const item of content) {
+        if (item.type === "thinking" && (item.thinking || item.redacted)) phase = "thinking";
+        if (item.type === "text" && item.text) phase = "responding";
+      }
       return {
         conversationId, running: Boolean(live.run), latestEntryId: latest ?? null,
         model: agent.model ? { providerId: agent.model.provider, modelId: agent.model.modelId } : null,
@@ -186,7 +193,10 @@ export function registerChatHandlers(registry: RuntimeHandlerRegistry, host: Dur
         failureReason: contextReset ? null : live.runFailure?.reason ?? null,
         canResume: !contextReset && !live.run && Boolean(live.runFailure && resumableReasons.has(live.runFailure.reason)),
         contextReset,
-        partialText: live.generation?.message?.content.filter((item) => item.type === "text").map((item) => item.text).join("").slice(0, 12000) ?? "",
+        phase,
+        partialThinking: thinking.slice(-12000),
+        thinkingTruncated: thinking.length > 12000,
+        partialText: content.filter((item) => item.type === "text").map((item) => item.text).join("").slice(0, 12000),
       };
     }, BACKGROUND_CONTEXT);
   });

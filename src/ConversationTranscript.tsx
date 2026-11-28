@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ChatMessage from "./ChatMessage";
 import StudioIcon from "./StudioIcon";
+import ThinkingBlock from "./ThinkingBlock";
 
 type TranscriptEntry = {
   id: number;
@@ -53,6 +54,18 @@ function modelText(value: unknown): string | null {
     }
   }
   return text.length ? text.join("\n") : null;
+}
+
+function modelThinking(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const thinking: string[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || item.role !== "assistant" || item.stopReason === "error" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "thinking" && !part.redacted && typeof part.thinking === "string") thinking.push(part.thinking);
+    }
+  }
+  return thinking.join("\n");
 }
 
 export default function ConversationTranscript({
@@ -298,9 +311,10 @@ export default function ConversationTranscript({
 
               </div>
 
+              {entry.kind === "pi.assistant" && <ThinkingBlock text={modelThinking(entry.model)} />}
               {entry.kind === "pi.reset" ? <p className="muted">此前消息保留在历史中，后续模型请求从这里开始。</p> : modelText(entry.model) !== null && ["studio.chat-input", "pi.user", "pi.assistant"].includes(entry.kind) ?
                 <ChatMessage text={modelText(entry.model) ?? ""} markdown={entry.kind === "pi.assistant"} /> :
-                <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
+                entry.kind === "pi.assistant" && modelThinking(entry.model) ? null : <pre className="transcript-content">{modelText(entry.model) ?? formatContent(entry.data)}</pre>}
 
               {onForked && entry.kind === "pi.assistant" && Array.isArray(entry.model) && entry.model.some((message: unknown) => {
                 if (!message || typeof message !== "object") return false;

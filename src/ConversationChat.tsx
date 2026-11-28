@@ -1,6 +1,7 @@
 import StudioIcon from "./StudioIcon";
 import ConversationModelPicker from "./ConversationModelPicker";
 import ConversationContextUsage from "./ConversationContextUsage";
+import ThinkingBlock from "./ThinkingBlock";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { thinkingLabels, type ThinkingLevel } from "./thinking";
@@ -13,6 +14,9 @@ type Status = {
   canResume: boolean;
   contextReset: boolean;
   thinkingLevel?: ThinkingLevel;
+  phase?: "waiting" | "thinking" | "responding" | null;
+  partialThinking?: string;
+  thinkingTruncated?: boolean;
 };
 type Input = { conversationId: number; requestId: string; providerId: string; modelId: string; content: string; thinkingLevel?: ThinkingLevel };
 export type ConversationDraft = { content: string; input: Input | null };
@@ -151,7 +155,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
         pending.current = null;
         setHasPending(false);
         setContent("");
-        setStatus((previous) => previous ? { ...previous, running: true, failureReason: null } : previous);
+        setStatus((previous) => previous ? { ...previous, running: true, failureReason: null, phase: "waiting", partialThinking: "", partialText: "" } : previous);
         onEntries.current();
       }
     } catch (cause: unknown) {
@@ -178,7 +182,7 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
       if (mounted.current) {
         pendingResume.current = null;
         setHasPendingResume(false);
-        setStatus((previous) => previous ? { ...previous, running: true, failureReason: null, canResume: false } : previous);
+        setStatus((previous) => previous ? { ...previous, running: true, failureReason: null, canResume: false, phase: "waiting", partialThinking: "", partialText: "" } : previous);
         onEntries.current();
       }
     } catch (cause: unknown) {
@@ -270,7 +274,11 @@ export default function ConversationChat({ conversationId, onEntriesChanged, cat
       <details className="chat-notes"><summary>对话说明</summary><div><p className="muted">草稿在本次打开期间按会话保留。</p>      <p className="muted">发送会调用所选服务商，可能产生费用；本阶段为文本对话，不执行工具。</p>
       <p className="muted">生成期间退出后，未完成请求会在重启时恢复，可能再次调用模型；需要结束时请先停止生成。</p>
 </div></details>
-      {status?.running && <div className="chat-live" role="status"><p>正在生成回复...</p>{status.partialText && <pre className="transcript-content">{status.partialText}</pre>}</div>}
+      {status?.running && <div className="chat-live">
+        <p role="status">{status.phase === "thinking" ? "正在思考..." : status.phase === "responding" ? "正在回复..." : "正在生成回复..."}</p>
+        <ThinkingBlock text={status.partialThinking ?? ""} truncated={status.thinkingTruncated} />
+        {status.partialText && <pre className="transcript-content">{status.partialText}</pre>}
+      </div>}
       {!status?.running && status?.failureReason && <p role="status" className="muted">{status.failureReason === "aborted" ? "生成已停止，已产生的历史会保留。" : "本轮未完成回复，请检查模型、凭据或网络后再发送。"}</p>}
       {(error || catalogError || modelError || statusError) && <div role="alert" className="error">{error || catalogError || modelError || statusError}</div>}
     </div>
